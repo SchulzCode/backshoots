@@ -1,0 +1,1549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BACKSHOOTS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Backshoots: the only recomp that runs on Intel, AMD and NVIDIA at locked 60 FPS. Ray tracing, path tracing, DLSS 5. No install.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BACKSHOOTS - locked 60 FPS, RAYTRACING, PATHTRACING, DLSS 5">
+<meta property="og:description" content="The recomp the recomps were afraid of. Single HTML file. No install. Is this clean? It is a browser tab.">
+<meta property="og:image" content="https://schulzcode.github.io/backshoots/preview.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:"Comic Sans MS","Comic Sans",Impact,sans-serif}
+  canvas{display:block;margin:0 auto;image-rendering:pixelated;cursor:crosshair;background:#2a7a2a;
+         filter:saturate(1.55) contrast(1.15) brightness(1.05)} /* "DLSS 5 neural oversaturation" */
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+// ---------- scaling to window ----------
+function fit(){
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px';
+  cv.style.marginTop = (innerHeight - H * s) / 2 + 'px';
+}
+addEventListener('resize', fit); fit();
+
+// ---------- the items (the whole joke) ----------
+const ITEMS = [
+  { name: 'HOOKSHOT',   short: 'HOOK', color: '#cfd8dc', range: 170, dmg: 1, cd: 0.45, quip: 'HOOKSHOT!' },
+  { name: 'LONGSHOT',   short: 'LONG', color: '#ffd54f', range: 400, dmg: 2, cd: 0.70, quip: 'LONGSHOT! (it is longer)' },
+  { name: 'CLAWSHOT',   short: 'CLAW', color: '#e040fb', range: 160, dmg: 2, cd: 0.60, quip: 'CLAWSHOT!' },
+  { name: 'BACKSHOOTS', short: 'BACK', color: '#ff7043', range: 0,   dmg: 1, cd: 0.35, quip: 'BACKSHOOTS!' },
+];
+ITEMS.forEach(i => i.lvl = 0);
+function itemRange(it){ return it.range * (1 + 0.25 * it.lvl); }
+function itemDmg(it){ return it.dmg + (it.lvl >= 2 ? 1 : 0); }
+let sel = 0, itemCd = 0, hook = null, shots = [], eshots = [];
+let faction = 0, factionMode = null, slow = 0, modal = null, menuOpen = false;
+let rtOn = true, ptOn = true, mfgOn = true, musicOn = true, dlss = 5;
+let nextCrash = 55, nextUpd = 85, runTime = 0, myName = 'u/anon', boardCache = [], lastRank = -1, runRank = 0;
+const HOSTILE = {
+  hook: [
+    'bro only uses Hookshot. touch grass.', 'imagine being this short-ranged', 'Hookshot main spotted. Downvoting.',
+    'your chain is a keychain', 'hookshot player detected, deploying "skill issue"', 'Longshot gang, assemble. A Hookshotter is here.',
+    'a chain that short is a cry for help',
+  ],
+  long: [
+    'Longshot main? what are you compensating for?', 'you need that range because you cannot aim', 'overcompensating chain enjoyer',
+    'Longshot users are the reason upstream is gone', 'Hookshot gang, assemble. A Longshotter is here.', 'touch grass, then touch Hookshot',
+    'imagine needing 2.4x the chain',
+  ],
+};
+const FACTION_LABELS = {
+  hook: ['HOOKSHOT SUPREMACY', 'LONGSHOT IS CHEATING', 'SHORT AND PROUD', 'LONG CHAINS ARE OVERRATED'],
+  long: ['LONGSHOT SUPREMACY', 'HOOKSHOT IS SHORT', 'LONGER IS BETTER', 'RANGE IS EVERYTHING'],
+};
+
+// ---------- input ----------
+const keys = {};
+let mouse = { x: W/2, y: H/2 };
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (['1','2','3','4'].includes(e.key)) sel = +e.key - 1;
+  if (e.key === 'Escape' && state === 'play' && !modal) menuOpen = !menuOpen;
+  if (e.key.toLowerCase() === 'm') musicOn = !musicOn;
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * W / r.width;
+  mouse.y = (e.clientY - r.top)  * H / r.height;
+});
+cv.addEventListener('wheel', e => { e.preventDefault(); sel = (sel + (e.deltaY > 0 ? 1 : 3)) % 4; }, { passive: false });
+cv.addEventListener('mousedown', e => {
+  initAudio();
+  { const r = cv.getBoundingClientRect(); mouse.x = (e.clientX - r.left) * W / r.width; mouse.y = (e.clientY - r.top) * H / r.height; }
+  if (state === 'boot') { if (bootT >= BOOT_LEN) { state = 'play'; beep(660, .15, 'triangle', .08, 600); } return; }
+  if (state === 'play' && menuOpen) { menuClick(); return; }
+  if (state === 'play' && modal) { if (modal.kind !== 'crash') modalClick(); return; }
+  if (state === 'dead') { if (e.button === 0) reset(); return; }
+  if (e.button === 0) swing();
+  else if (e.button === 2) useItem();
+});
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+// ---------- audio (beeps, because shitty) ----------
+let ac = null;
+function initAudio(){ if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} } }
+function beep(freq, dur, type='square', vol=0.06, slide=0){
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), ac.currentTime + dur);
+  g.gain.value = vol; g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+  o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + dur);
+}
+
+// ---------- world ----------
+let state = 'boot', player, enemies, items, particles, trees, score, wave, shake, time = 0, popups;
+let streak = 0, streakT = 0, kills = 0;
+const BOOT_LEN = 5.5; let bootT = 0;
+
+function rnd(a, b){ return a + Math.random() * (b - a); }
+function pick(a){ return a[Math.floor(Math.random() * a.length)]; }
+
+function reset(){
+  state = 'play';
+  player = { x: W/2, y: H/2, r: 12, hp: 6, maxhp: 6, face: 0, swingT: 0, swingDir: 0, hitList: new Set(), inv: 0, vx: 0, vy: 0 };
+  enemies = []; items = []; particles = []; popups = []; shots = []; eshots = []; hook = null; itemCd = 0;
+  ITEMS.forEach(i => i.lvl = 0); faction = 0; factionMode = null; slow = 0; modal = null; menuOpen = false; runTime = 0;
+  nextCrash = rnd(45, 70); nextUpd = rnd(75, 100); nextHot = rnd(10, 16); hot = null; nextDrama = rnd(22, 34); drama = null; discord = null; lastRank = -1; myName = 'u/' + pick(USERS);
+  score = 0; wave = 0; shake = 0; streak = 0; kills = 0; introT = 10;
+  trees = [];
+  for (let i = 0; i < 14; i++) {
+    const x = rnd(40, W - 40), y = rnd(60, H - 40);
+    if (Math.hypot(x - W/2, y - H/2) > 90) trees.push({ x, y, r: 18 });
+  }
+  nextWave();
+}
+
+function spawnPos(){
+  let x, y;
+  do { x = rnd(20, W - 20); y = rnd(50, H - 20); } while (Math.hypot(x - player.x, y - player.y) < 220);
+  return [x, y];
+}
+
+function nextWave(){
+  wave++;
+  const boss = wave % 4 === 0;
+  const n = boss ? Math.floor(wave / 2) + 1 : 3 + wave * 2;
+  for (let i = 0; i < n; i++) {
+    const [x, y] = spawnPos();
+    const big = wave > 2 && Math.random() < 0.2;
+    let kind = 'blob'; const rr = Math.random();
+    if (wave >= 3 && rr < 0.15) kind = 'archer'; else if (wave >= 2 && rr < 0.30) kind = 'dodger'; else if (wave >= 2 && rr < 0.42) kind = 'hater'; else if (wave >= 2 && rr < 0.54) kind = 'slop';
+    const sm = kind !== 'blob';
+    enemies.push({ x, y, kind, r: sm ? 13 : (big ? 18 : 12), hp: kind === 'hater' ? 3 : (sm ? 2 : (big ? 4 : 2)), dmg: 1,
+      speed: kind === 'dodger' ? 1.5 + wave * 0.05 : kind === 'archer' ? 0.7 : (big ? 0.7 : 1.0) + wave * 0.07,
+      kx: 0, ky: 0, flash: 0, big: big && !sm, wob: Math.random() * 6, stun: 0, shootT: rnd(1, 2.5), dodgeCd: 0, dodgeT: 0, dvx: 0, dvy: 0 });
+  }
+  if (boss) {
+    const [x, y] = spawnPos();
+    const dragon = wave % 8 === 0;
+    if (dragon) enemies.push({ x, y, kind: 'dragon', r: 34, hp: 16 + wave, maxhp: 16 + wave, dmg: 2, speed: 0.6, kx: 0, ky: 0, flash: 0, big: true, boss: true, wob: 0, stun: 0, hist: [], shootT: 2, phaseT: 2, noisy: true, noiseP: 0 });
+    else enemies.push({ x, y, r: 30, hp: 10 + wave, maxhp: 10 + wave, dmg: 2, speed: 0.75, kx: 0, ky: 0, flash: 0, big: true, boss: true, wob: 0, stun: 0, hist: [] });
+    popup(W/2, H/2 - 20, dragon ? 'BOSS: FRAME GEN DRAGON (denoising...)' : 'BOSS: GANON.EXE (4x MFG)', '#f0f');
+    beep(100, 0.8, 'sawtooth', 0.1, 80);
+    say('boss', true);
+  }
+  popup(W/2, H/2 - 60, 'WAVE ' + wave, '#fff');
+}
+
+function popup(x, y, text, color){ popups.push({ x, y, text, color, t: 0 }); }
+
+function spawnParts(x, y, color, n=10){
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.28, s = rnd(1, 4);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rnd(15, 30), color });
+  }
+}
+
+function swing(){
+  if (state !== 'play' || player.swingT > 0) return;
+  player.swingT = 1;
+  player.swingDir = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  player.hitList.clear();
+  beep(500, 0.12, 'sawtooth', 0.05, -300);
+}
+
+const SWING_LEN = 0.22;
+const SWORD_RANGE = 50;
+
+function useItem(){
+  if (state !== 'play' || itemCd > 0 || hook) return;
+  const it = ITEMS[sel], p = player;
+  const a = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+  itemCd = it.cd;
+  popup(p.x, p.y - 36, it.quip, it.color);
+  say(['hook', 'long', 'claw', 'back'][sel]);
+  faction = Math.max(-1, Math.min(1, faction + [-0.09, 0.09, 0.03, (Math.random() < 0.5 ? -1 : 1) * 0.05][sel]));
+  if (sel === 3) {
+    // BACKSHOOTS: fires BEHIND you, away from the cursor. you were warned.
+    const np = 5 + 2 * it.lvl;
+    for (let i = 0; i < np; i++) {
+      const ang = a + Math.PI + (i - (np - 1) / 2) * 0.16;
+      shots.push({ x: p.x, y: p.y, vx: Math.cos(ang) * 700, vy: Math.sin(ang) * 700, life: 0.7 });
+    }
+    p.vx += Math.cos(a) * 5; p.vy += Math.sin(a) * 5; // recoil flings you forward
+    shake = Math.max(shake, 5);
+    beep(240, 0.18, 'sawtooth', 0.08, -150);
+    return;
+  }
+  hook = { x: p.x, y: p.y, dx: Math.cos(a), dy: Math.sin(a), dist: 0, max: itemRange(it), type: sel, state: 'out', target: null, t: 0, px: 0, py: 0 };
+  beep(900, 0.1, 'square', 0.05, -400);
+}
+
+function hurt(e, dmg, kx, ky){
+  if (e.dead) return;
+  if (e.kind === 'dragon' && e.noisy) { popup(e.x, e.y - 44, 'NOISY! WAIT FOR DENOISE', '#fff'); beep(150, 0.08, 'square', 0.05); return; }
+  e.hp -= dmg; e.flash = 8; e.kx += kx; e.ky += ky;
+  shake = Math.max(shake, 6); beep(180, 0.1, 'square', 0.07, -100);
+  spawnParts(e.x, e.y, '#ffeb3b', 8);
+  if (e.hp <= 0) killEnemy(e);
+}
+
+function killEnemy(e){
+  e.dead = true;
+  if (e.kind === 'slop' && !e.child) { // slop regenerates: 2 smaller, faster copies
+    for (let i = 0; i < 2; i++) enemies.push({ x: e.x + rnd(-12, 12), y: e.y + rnd(-12, 12), kind: 'slop', child: true, r: 9, hp: 1, dmg: 1, speed: 1.7, kx: 0, ky: 0, flash: 0, big: false, wob: Math.random() * 6, stun: 0, shootT: 0, dodgeCd: 0, dodgeT: 0, dvx: 0, dvy: 0 });
+    popup(e.x, e.y - 22, 'REGENERATING (7 FINGERS)', '#f0f');
+  }
+  kills++; streak++; streakT = 2.2; if (streak === 5) dlssMoment();
+  if (streak >= 3) { say('streak'); popup(W/2, 120, 'x' + streak + ' ' + pick(['COMBO!', 'KILLSHOT!', 'SHOTS FIRED!', 'RECOMPILED!']), '#ff0'); score += 1; }
+  spawnParts(e.x, e.y, e.boss ? '#f0f' : e.big ? '#a0f' : '#e22', e.boss ? 60 : 20);
+  if (e.boss) {
+    for (let i = 0; i < 8; i++) items.push({ x: e.x + rnd(-40, 40), y: e.y + rnd(-40, 40), type: i < 2 ? 'heart' : 'blue', t: 0 });
+    popup(e.x, e.y - 40, e.kind === 'dragon' ? 'NOISE FLOOR DELETED' : 'GENERATED FRAMES DELETED', '#0ff');
+    items.push({ x: e.x, y: e.y + 30, type: 'up', slot: Math.floor(Math.random() * 4), t: 0 });
+    dlssMoment();
+    shake = 20;
+  } else {
+    const r = Math.random();
+    if (Math.random() < 0.08) items.push({ x: e.x, y: e.y, type: 'up', slot: Math.floor(Math.random() * 4), t: 0 });
+    if (r < 0.2) items.push({ x: e.x, y: e.y, type: 'heart', t: 0 });
+    else if (r < 0.7) items.push({ x: e.x, y: e.y, type: e.big ? 'blue' : 'green', t: 0 });
+  }
+  beep(300, 0.2, 'square', 0.07, 400);
+}
+
+function collideTrees(o){
+  for (const t of trees) {
+    const dx = o.x - t.x, dy = o.y - t.y, d = Math.hypot(dx, dy), min = o.r + t.r - 4;
+    if (d < min && d > 0) { o.x = t.x + dx / d * min; o.y = t.y + dy / d * min; }
+  }
+  o.x = Math.max(o.r, Math.min(W - o.r, o.x));
+  o.y = Math.max(o.r + 30, Math.min(H - o.r, o.y));
+}
+
+// ---------- fake system messages ----------
+const TOASTS = [
+  'Update available: Longshot v3.0.0-rc.3 → rc.4',
+  'Upstream: gone',
+  'Hookshot v2.2.0-rc.1 (upstream gone)',
+  'Clawshot: now with 100% more claws',
+  'Shader compile stutter detected (there is none)',
+  'Frame generation 4x: 3 of 4 frames are lies',
+  'Rupee count tuned by ear',
+  'Your ROM is definitely legal. Probably.',
+  'Saves are shared between Hookshot and Longshot ✔',
+  'Backshoots: never merged upstream. Never will be.',
+  'PR #840 merged (by us)',
+  'DLSS 5 neural face enhancement applied to Link',
+  'Pathtracer is denoising your hearts',
+  'Widescreen patch active (800x600)',
+  'Recompiling... (it is a browser game)',
+  'Ray-traced rupees: 0 rays, 0 traced',
+  'Gamepad not found. WASD is also fine.',
+  'HDR enabled (it is not)',
+];
+let toast = null, nextToast = 3, glitchT = 0, nextGlitch = 7;
+
+// ---------- "the community" (fake comments flying across the screen) ----------
+const USERS = [
+  'Link_Enjoyer_69', 'HookshotHater', 'LongshotMaxxer', '5090TiDouble', 'definitely_not_a_pirate', 'ClawFan2000',
+  'ganon_main', 'RC1_Survivor', 'upstream_is_gone', 'DLSS5Believer', 'ThrowawayRecomp23', 'BackshootsMain',
+  'xX_Zelda_Fan_Xx', 'AutoModerator', 'jpeg_enjoyer', 'ask_my_cousin', 'RTX_or_bust', 'n64_boomer', 'shader_cache_enjoyer',
+];
+const COMMENTS = [
+  'hookshot sucks, longshot is so much better',
+  'guys works fine on my 128GB RAM double 5090 Ti',
+  'Longshot is just Hookshot but longer. Still better.',
+  'Clawshot is just Hookshot with extra steps',
+  'Upstream is gone, use Longshot. Everyone knows this.',
+  'does it run on my Steam Deck? asking for a friend',
+  'have you tried turning off DLSS 5?',
+  'NOT WORKING after update, why is nobody helping??? EDIT: solved, I was not holding the controller',
+  'first',
+  'black screen on launch. already reinstalled Windows twice, devs pls fix',
+  'posting this from my 2009 Dell, 60 fps no problem (it is a browser game)',
+  'can someone ELI5 what a recomp is',
+  'ngl the pathtracing is insane. wait, what pathtracing?',
+  'still waiting for Clawshot rc.2 :(',
+  'does this support 8K? I only own 8K OLEDs',
+  'downvoted for saying Hookshot is fine',
+  '"tuned by ear" is not a benchmark',
+  'my wife left me but at least the game runs at 60 fps',
+  '128GB RAM and it still stutters. Nvidia pls fix',
+  'Edit: thanks for the gold, kind stranger!',
+  'Edit 2: wow this blew up',
+  'frame gen is just 3 lies per truth. I love it',
+  'Backshoots is the only real recomp, the rest are cope',
+  'Mods: this is your third warning. No ROM requests.',
+  'this post is 12 hours old, why is it #1',
+  'unpopular opinion: the hookshot is mid',
+  'Longshot users when the chain is 2 pixels longer: "finally, 4K"',
+  'who is still on Hookshot rc.1 in 2026 lmao',
+  'my GPU is on fire but the shadows look amazing',
+  'please just pin the FAQ. oh wait, it is pinned. my bad',
+  'the 60 FPS counter has been showing 60.0 for 3 hours. suspicious',
+  'is it legal? asking for a lawyer',
+  'it works on my machine',
+  'GOTY. ignore the haters',
+  'rc.3 broke my saves. rc.1 gang rise up',
+  'did anyone else get the neural face on Link? he looks 12% more confident',
+  'Clawshot grabbed my enemy and my heart',
+  'I came here for the discourse and stayed for the lens flare',
+  'this sub has become 90% hookshot vs longshot arguments',
+  'ratio + upstream is gone',
+  'hookshot is a skill check and you are failing it',
+  'unpopular opinion: Clawshot is the best one. downvote me',
+  'every day this sub asks "is Hookshot or Longshot better". it is Longshot.',
+  'who up hooking they shot',
+  'does anyone have a mirror for rc.4? asking for me',
+  'works on my machine. my machine is a 5090 Ti in a jet engine case',
+  'RAM usage 127GB, is that normal? (128GB installed)',
+  'i got a 5090 Ti and a second 5090 Ti. why does it stutter on the title screen',
+  'thread locked by mods. reason: hookshot users',
+  'The Longshot dev replied!! (it was a bot)',
+  'Backshoots has no stable release. perfect, I live on the edge',
+  'I tried Hookshot, Longshot, Clawshot. Now I only fear Backshoots.',
+  'just ordered a 6090 Ti Super, will report back',
+  'wait it needs a ROM? I thought this was a game',
+  'upvote if you also pressed the right mouse button 40 times',
+  'frame gen at 4x makes my hearts feel loved',
+  'RT on N64 graphics is a mood. also a crime.',
+  'DLSS 5 turned my Link into a 4K stock photo model',
+  'My pathtracer said "it is 1996". I agree.',
+  'Raytracing is on. I checked. The labels say so.',
+  'The flashing labels give me a seizure but I love it',
+  '60 FPS locked. I can feel it. I really can.',
+  'Longshot patch notes: "longer". Hookshot patch notes: "shorter". Fair.',
+  'what is the difference between Hookshot and Longshot? it is in the name',
+  'asked for help in the Discord, got banned for saying "Hookshot"',
+  'Clawshot rc.1 deleted my Hookshot saves. They share saves. Check your backups.',
+  'I just wanted to play Zelda and now I have opinions about chain length',
+  'mods sleeping, post Hookshot memes',
+  'Nvidia: "the more you buy the more you save" me: *buys 2nd 5090 Ti*',
+  'Backshoots is bait for people who say "I only play the Longshot"',
+  'AutoModerator: your post was removed for not containing "Longshot"',
+  'Hookshot user here. Sorry for the trouble. I will be better.',
+  'fun fact: the Longshot is 3x longer than the Hookshot. i measured. in pixels.',
+  'Frame gen on? Frame gen off? The ghost boss does not care',
+  'i read the sidebar and still pressed the wrong button',
+  'guys, update: it still works on my 128GB RAM double 5090 Ti',
+  '5090 Ti users are a different breed. they have never seen a stutter',
+  'My cat walked on the keyboard and now I am pulling a Clawshot combo',
+  'I thought "recomp" was a typo. It was not a typo.',
+  'Hookshot has hands. Longshot has reach. Clawshot has claws. Backshoots has regrets.',
+  'ban Hookshot, buff Longshot, nerf Backshoots',
+  'LPT: Hookshot makes you faster. Longshot makes you longer.',
+  'I ran it on a potato. The potato died. Worth it.',
+  'bro the pathtracing is so good I can see my own reflection in the rupees',
+  'upstream gone. everybody forks. nobody merges. circle of life',
+  'did the boss just frame-gen himself??',
+  'PSA: the ghost boss is not real. the real boss is also not real.',
+  'Edit 3: yes I know about the DLSS 5 artifacts. They are a feature.',
+  'MFG 4X means 4x fake frames but 4x fun. math checks out',
+];
+const EVENT_COMMENTS = {
+  hook: ['hookshot sucks, longshot is so much better', 'Hookshot in 2026?? ok boomer', 'hookshot gang where u at', 'hookshot users every time: "it is fine"', 'imagine playing Hookshot'],
+  long: ['LONGSHOT GANG', 'longshot is just so much better, i said what i said', 'that chain is 2.4x longer. cinema.', 'the Longshot has entered the chat', 'longer = better. science.'],
+  claw: ['Clawshot: finally some good food', 'claw > hook, change my mind', 'did the claw just yoink that??', 'claw machine but the prize is violence'],
+  back: ['Backshoots is a war crime', 'recoil fling is the best movement tech', 'it shoots BEHIND you. who asked for this', 'Backshoots: hit them where they are not looking', 'my aim is bad but my back is good'],
+  boss: ['Ganon.EXE is just DLSS 5 AI slop', 'frame gen boss is peak cinema', 'real frame? generated frame? i cant tell'],
+  dead: ['skill issue', 'git gud, use Longshot', 'died at 60 fps, still counts', 'F', 'Hookshot users do not survive. Longshot users do.', 'bro died to a red blob'],
+  streak: ['sheeeesh', 'combo!! hookshot users in shambles', 'rupees printing'],
+};
+let fly = [], nextFly = 2, flyCd = 0;
+function fmtScore(){ return pick(['1', '3', '12', '69', '420', '1.2k', '2.4k', '5.1k', '9.9k', '-47', '0', '8008']); }
+const FLAIRS = [['Longshot Main', '#ffb300'], ['Hookshot Hater', '#ef5350'], ['Clawshot Enjoyer', '#ba68c8'], ['RC.1 Survivor', '#66bb6a'],
+  ['5090 Ti x2', '#76ff03'], ['Trust Me Bro', '#90a4ae'], ['Mod', '#26a69a'], ['Backshoots Apologist', '#ff7043']];
+const AWARD_COLORS = ['#ffd700', '#b9f6ca', '#cfd8dc', '#ff4081', '#40c4ff'];
+function spawnComment(text){
+  ctx.font = '12px "Segoe UI", sans-serif';
+  const maxW = 240, words = text.split(' '), lines = []; let cur = '';
+  for (const w of words) {
+    const t = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+  }
+  lines.push(cur);
+  const bodyW = Math.max(...lines.map(l => ctx.measureText(l).width));
+  const hdr = 'r/SwitchPirates2 · u/' + pick(USERS).replace(/^u\//, '');
+  const fl = Math.random() < 0.55 ? pick(FLAIRS) : null;
+  const aw = []; if (Math.random() < 0.4) for (let i = 0, n = 1 + Math.floor(Math.random() * 3); i < n; i++) aw.push(pick(AWARD_COLORS));
+  ctx.font = '10px "Segoe UI", sans-serif';
+  const hdrW = ctx.measureText(hdr).width + (fl ? ctx.measureText(fl[0]).width + 14 : 0);
+  const w = Math.max(bodyW, hdrW) + 56, h = 28 + lines.length * 15 + (aw.length ? 12 : 0);
+  const dir = Math.random() < 0.75 ? -1 : 1;
+  fly.push({ lines, hdr, fl, aw, w, h, score: fmtScore(), dir, x: dir < 0 ? W + 10 : -w - 10, y: rnd(120, H - 120 - h),
+             vx: dir * rnd(90, 160), bob: rnd(3, 9), ph: rnd(0, 6.28), age: 0, removeAt: Math.random() < 0.13 ? rnd(1.5, 4) : 1e9, removed: false });
+  if (fly.length > 11) fly.shift();
+  babble();
+}
+function say(kind, force){
+  if (!force && (flyCd > 0 || Math.random() > 0.4)) return;
+  flyCd = 1.5; spawnComment(pick(EVENT_COMMENTS[kind]));
+}
+function updateComments(dt){
+  nextFly -= dt; if (flyCd > 0) flyCd -= dt;
+  if (nextFly <= 0) {
+    spawnComment(factionMode && Math.random() < 0.65 ? pick(HOSTILE[factionMode]) : pick(COMMENTS));
+    nextFly = factionMode ? rnd(0.5, 1.2) : rnd(0.9, 2.2);
+  }
+  for (const c of fly) {
+    c.x += c.vx * dt; c.age += dt;
+    if (!c.removed && c.age > c.removeAt) { c.removed = true; beep(200, 0.12, 'square', 0.04, -100); }
+  }
+  fly = fly.filter(c => c.dir < 0 ? c.x > -c.w - 20 : c.x < W + 20);
+}
+function drawComments(){
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  for (const c of fly) {
+    const y = c.y + Math.sin(time * 2 + c.ph) * c.bob, x = c.x + (c.removed ? Math.sin(time * 60) * 2 : 0);
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = c.removed ? '#3a1414' : '#1a1a1b'; ctx.fillRect(x, y, c.w, c.h);
+    ctx.strokeStyle = c.removed ? '#c62828' : '#4a4a4d'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, c.w - 1, c.h - 1);
+    ctx.fillStyle = '#272729'; ctx.fillRect(x, y, 30, c.h);
+    ctx.fillStyle = '#ff4500'; ctx.beginPath(); ctx.moveTo(x + 15, y + 6); ctx.lineTo(x + 23, y + 16); ctx.lineTo(x + 7, y + 16); ctx.fill();
+    ctx.font = 'bold 10px "Segoe UI", sans-serif'; ctx.fillStyle = '#d7dadc'; ctx.textAlign = 'center';
+    ctx.fillText(c.score, x + 15, y + 20); ctx.textAlign = 'left';
+    ctx.font = '10px "Segoe UI", sans-serif'; ctx.fillStyle = '#818384';
+    const hdr = c.removed ? 'r/SwitchPirates2 · [deleted]' : c.hdr;
+    ctx.fillText(hdr, x + 38, y + 5);
+    if (c.fl && !c.removed) {
+      const fx = x + 38 + ctx.measureText(hdr).width + 6, fw = ctx.measureText(c.fl[0]).width + 8;
+      ctx.fillStyle = c.fl[1]; ctx.fillRect(fx, y + 3, fw, 12);
+      ctx.fillStyle = '#000'; ctx.fillText(c.fl[0], fx + 4, y + 5);
+    }
+    ctx.font = '12px "Segoe UI", sans-serif';
+    if (c.removed) {
+      ctx.fillStyle = '#ef5350'; ctx.fillText('[removed by moderators]', x + 38, y + 21);
+      ctx.save(); ctx.translate(x + c.w / 2, y + c.h / 2); ctx.rotate(-0.12);
+      ctx.strokeStyle = '#ff1744'; ctx.lineWidth = 3; ctx.strokeRect(-48, -11, 96, 22);
+      ctx.fillStyle = '#ff1744'; ctx.font = 'bold 15px Impact, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('REMOVED', 0, 1);
+      ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    } else {
+      ctx.fillStyle = '#d7dadc';
+      c.lines.forEach((l, i) => ctx.fillText(l, x + 38, y + 21 + i * 15));
+      c.aw.forEach((col, i) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x + 44 + i * 14, y + c.h - 9, 5, 0, 6.28); ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke(); });
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ---------- update ----------
+let last = performance.now();
+let introT = 10;
+function update(dt){
+  time += dt;
+  if (state === 'boot') bootT += dt;
+
+  // toasts + frame-gen glitch events
+  nextToast -= dt;
+  if (nextToast <= 0) { toast = { text: pick(TOASTS), t: 0 }; nextToast = rnd(5, 9); }
+  if (toast) { toast.t += dt; if (toast.t > 3.2) toast = null; }
+  nextGlitch -= dt;
+  if (nextGlitch <= 0) { glitchT = mfgOn ? 0.9 : 0; nextGlitch = rnd(7, 13); }
+  if (glitchT > 0) glitchT -= dt;
+  updateComments(dt);
+  updateMusic(dt);
+  updateDrama(dt);
+  nextHot -= dt;
+  if (nextHot <= 0 && state === 'play' && !menuOpen && !modal) { hot = { title: pick(HOT_TITLES), score: pick(['12.4k', '8.1k', '69.4k', '420', '3.3k', '99.9k']), comments: pick(['3.1k', '412', '1.2k', '69', '8.8k']), t: 0 }; nextHot = rnd(18, 30); }
+  if (hot) { hot.t += dt; if (hot.t > 5) hot = null; }
+
+  if (state !== 'play') return;
+  if (menuOpen) return;
+  if (modal) {
+    modal.t += dt;
+    if (modal.kind === 'crash' && modal.t > 3) endModal(false);
+    else if (modal.kind !== 'crash' && modal.t > 9) endModal(modal.kind === 'update');
+    return;
+  }
+  runTime += dt;
+  nextCrash -= dt; nextUpd -= dt;
+  if (nextCrash <= 0) { startModal('crash'); nextCrash = rnd(50, 80); nextUpd = Math.max(nextUpd, 20); return; }
+  if (nextUpd <= 0) { startModal(Math.random() < 0.5 ? 'virus' : 'update'); nextUpd = rnd(75, 110); nextCrash = Math.max(nextCrash, 20); return; }
+  updateFaction(dt);
+  const p = player;
+  if (streakT > 0) { streakT -= dt; if (streakT <= 0) streak = 0; }
+
+  // movement
+  let dx = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+  let dy = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
+  if (dx || dy) { const l = Math.hypot(dx, dy); dx /= l; dy /= l; }
+  const sp = p.swingT > 0 ? 100 : 170;
+  p.x += dx * sp * dt + p.vx; p.y += dy * sp * dt + p.vy;
+  p.vx *= 0.8; p.vy *= 0.8;
+  collideTrees(p);
+  p.face = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+  if (p.inv > 0) p.inv -= dt;
+
+  // swing
+  if (p.swingT > 0) {
+    p.swingT -= dt / SWING_LEN;
+    const prog = 1 - Math.max(0, p.swingT);
+    const ang = p.swingDir - 1.2 + prog * 2.4;
+    for (const e of enemies) {
+      if (e.dead || p.hitList.has(e)) continue;
+      const ex = e.x - p.x, ey = e.y - p.y, d = Math.hypot(ex, ey);
+      if (d < SWORD_RANGE + e.r) {
+        let da = Math.atan2(ey, ex) - ang;
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        if (Math.abs(da) < 0.7) {
+          p.hitList.add(e);
+          hurt(e, 1, ex / d * (e.boss ? 3 : 9), ey / d * (e.boss ? 3 : 9));
+        }
+      }
+    }
+  }
+
+  updateItems(dt);
+
+  // enemies
+  for (const e of enemies) {
+    if (e.dead) continue;
+    e.wob += dt * 8;
+    const ex = p.x - e.x, ey = p.y - e.y, d = Math.hypot(ex, ey) || 1;
+    if (e.stun > 0) e.stun -= dt;
+    else moveEnemy(e, ex, ey, d, dt);
+    e.x += e.kx; e.y += e.ky;
+    e.kx *= 0.7; e.ky *= 0.7;
+    if (e.flash > 0) e.flash--;
+    if (e.boss) { e.histT = (e.histT || 0) + dt; if (e.histT > 0.07) { e.histT = 0; e.hist.unshift({ x: e.x, y: e.y }); if (e.hist.length > 16) e.hist.pop(); } }
+    collideTrees(e);
+    if (d < e.r + p.r && p.inv <= 0) {
+      p.hp -= e.dmg; p.inv = 1; shake = 12;
+      p.vx = -ex / d * 6; p.vy = -ey / d * 6;
+      beep(120, 0.25, 'sawtooth', 0.08, -60);
+      spawnParts(p.x, p.y, '#f44', 14);
+      if (p.hp <= 0) playerDied();
+    }
+  }
+  enemies = enemies.filter(e => !e.dead);
+
+  // pickups
+  for (const it of items) {
+    it.t += dt;
+    if (Math.hypot(it.x - p.x, it.y - p.y) < 20) {
+      it.dead = true;
+      if (it.type === 'up') upgrade(it.slot);
+      else if (it.type === 'heart') { p.hp = Math.min(p.maxhp, p.hp + 2); popup(it.x, it.y, '+HP', '#f66'); beep(880, 0.15, 'triangle', 0.07, 400); }
+      else { score += it.type === 'blue' ? 5 : 1; popup(it.x, it.y, it.type === 'blue' ? '+5' : '+1', '#6cf'); beep(1200, 0.08, 'triangle', 0.06, 300); }
+    }
+  }
+  items = items.filter(i => !i.dead);
+
+  if (enemies.length === 0) nextWave();
+
+  for (const q of particles) { q.x += q.vx; q.y += q.vy; q.vx *= 0.93; q.vy *= 0.93; q.life--; }
+  particles = particles.filter(q => q.life > 0);
+  for (const q of popups) { q.t += dt; q.y -= 20 * dt; }
+  popups = popups.filter(q => q.t < 1.2);
+  if (shake > 0) shake *= 0.85;
+}
+
+const DEATH = [
+  'Upstream: gone. You: also gone.',
+  'Skill issue (not a recomp bug)',
+  'Backshoots did not save you',
+  'Try the Longshot. It is longer.',
+  'DLSS 5 hallucinated your health bar',
+  'rc.1 of dying',
+];
+let deathLine = DEATH[0];
+
+function updateItems(dt){
+  const p = player;
+  if (itemCd > 0) itemCd -= dt;
+
+  // enemy projectiles (arrows, dragon fireballs). swords can parry them.
+  for (const s of eshots) {
+    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    if (s.life <= 0 || s.x < -20 || s.x > W + 20 || s.y < 20 || s.y > H + 20) { s.dead = true; continue; }
+    if (p.swingT > 0) {
+      const dx = s.x - p.x, dy = s.y - p.y, d = Math.hypot(dx, dy);
+      if (d < SWORD_RANGE + 6) {
+        let da = Math.atan2(dy, dx) - (p.swingDir - 1.2 + (1 - Math.max(0, p.swingT)) * 2.4);
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        if (Math.abs(da) < 0.9) { s.dead = true; popup(s.x, s.y, 'PARRY!', '#fff'); beep(1400, 0.06, 'triangle', 0.07); spawnParts(s.x, s.y, '#fff', 6); score += 1; continue; }
+      }
+    }
+    if (p.inv <= 0 && Math.hypot(s.x - p.x, s.y - p.y) < p.r + s.r) { damagePlayer(s.dmg || 1, s.vx, s.vy); s.dead = true; continue; }
+    for (const t of trees) if (Math.hypot(s.x - t.x, s.y - t.y) < t.r) { s.dead = true; break; }
+  }
+  eshots = eshots.filter(s => !s.dead);
+
+  // backshoots pellets
+  for (const s of shots) {
+    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    if (s.life <= 0 || s.x < 0 || s.x > W || s.y < 30 || s.y > H) { s.dead = true; continue; }
+    for (const e of enemies) {
+      if (e.dead) continue;
+      if (Math.hypot(e.x - s.x, e.y - s.y) < e.r + 4) { hurt(e, 1, s.vx * 0.006, s.vy * 0.006); s.dead = true; break; }
+    }
+  }
+  shots = shots.filter(s => !s.dead);
+
+  if (!hook) return;
+  const h = hook, it = ITEMS[h.type];
+  h.t += dt;
+
+  if (h.state === 'out') {
+    const step = 900 * dt;
+    h.x += h.dx * step; h.y += h.dy * step; h.dist += step;
+    for (const e of enemies) {
+      if (e.dead || Math.hypot(e.x - h.x, e.y - h.y) > e.r + 6) continue;
+      if (e.kind === 'hater' && h.type === 0) {
+        popup(e.x, e.y - 26, 'HOOKSHOT SUCKS', '#f66'); h.state = 'back'; p.vx -= h.dx * 9; p.vy -= h.dy * 9;
+        shake = Math.max(shake, 8); beep(110, 0.2, 'sawtooth', 0.07, -40); say('hook', true); return;
+      }
+      h.target = e; beep(700, 0.08, 'square', 0.07, 300);
+      if (h.type === 2) { h.state = 'reel'; h.t = 0; }
+      else { hurt(e, itemDmg(it), h.dx * 5, h.dy * 5); h.state = 'pull'; h.t = 0; h.px = e.x; h.py = e.y; }
+      return;
+    }
+    for (const t of trees) {
+      if (Math.hypot(t.x - h.x, t.y - h.y) > t.r) continue;
+      beep(1000, 0.06, 'triangle', 0.07);
+      if (h.type === 2) { h.state = 'back'; popup(t.x, t.y - 30, 'nothing to claw', '#fff'); }
+      else { h.state = 'pull'; h.t = 0; h.px = t.x; h.py = t.y; h.target = null; }
+      return;
+    }
+    if (h.dist >= h.max || h.x < 0 || h.x > W || h.y < 30 || h.y > H) h.state = 'back';
+  } else if (h.state === 'back') {
+    const d = Math.hypot(p.x - h.x, p.y - h.y) || 1;
+    h.x += (p.x - h.x) / d * 1400 * dt; h.y += (p.y - h.y) / d * 1400 * dt;
+    if (d < 16) hook = null;
+  } else if (h.state === 'pull') {
+    if (h.target && !h.target.dead) { h.px = h.target.x; h.py = h.target.y; }
+    h.x = h.px; h.y = h.py;
+    const d = Math.hypot(h.px - p.x, h.py - p.y) || 1;
+    const stop = (h.target ? h.target.r : 18) + p.r + 2;
+    p.inv = Math.max(p.inv, 0.25);
+    if (d <= stop || h.t > 1.2) { p.inv = Math.max(p.inv, 0.5); hook = null; return; }
+    p.x += (h.px - p.x) / d * 750 * dt; p.y += (h.py - p.y) / d * 750 * dt;
+  } else if (h.state === 'reel') {
+    const e = h.target;
+    if (!e || e.dead) { hook = null; return; }
+    h.x = e.x; h.y = e.y;
+    const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+    e.stun = 0.4;
+    if (d < p.r + e.r + 10 || h.t > 1.2) { hurt(e, itemDmg(it), 0, 0); popup(e.x, e.y - 24, 'CLAW!', '#e040fb'); hook = null; return; }
+    const pullStr = e.boss ? 250 : 650;
+    e.x += (p.x - e.x) / d * pullStr * dt; e.y += (p.y - e.y) / d * pullStr * dt;
+  }
+}
+
+// ---------- drawing ----------
+function drawGround(){
+  ctx.fillStyle = '#2f8a2f'; ctx.fillRect(0, 0, W, H);
+  for (let y = 0; y < H; y += 40) for (let x = 0; x < W; x += 40) {
+    if (((x + y) / 40) % 2 === 0) { ctx.fillStyle = '#2a7f2a'; ctx.fillRect(x, y, 40, 40); }
+  }
+  ctx.fillStyle = '#a8803f'; ctx.fillRect(0, H/2 - 25, W, 50);
+}
+
+function drawTree(t){
+  ctx.fillStyle = '#5b3a1a'; ctx.fillRect(t.x - 5, t.y, 10, 20);
+  ctx.fillStyle = '#145214'; ctx.beginPath(); ctx.arc(t.x, t.y - 4, t.r, 0, 6.28); ctx.fill();
+  ctx.fillStyle = '#1d7a1d'; ctx.beginPath(); ctx.arc(t.x - 4, t.y - 8, t.r * 0.6, 0, 6.28); ctx.fill();
+}
+
+function blob(e, x, y, color){
+  const sq = 1 + Math.sin(e.wob) * 0.12;
+  ctx.save(); ctx.translate(x, y); ctx.scale(1 / sq, sq);
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(0, 0, e.r, 0, 6.28); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillRect(-e.r * 0.5, -e.r * 0.3, e.r * 0.4, e.r * 0.4); ctx.fillRect(e.r * 0.1, -e.r * 0.3, e.r * 0.4, e.r * 0.4);
+  ctx.fillStyle = '#000'; ctx.fillRect(-e.r * 0.35, -e.r * 0.15, 3, 3); ctx.fillRect(e.r * 0.25, -e.r * 0.15, 3, 3);
+  ctx.restore();
+}
+
+function drawEnemy(e){
+  if (e.kind === 'dragon') { drawDragon(e); return; }
+  if (e.boss) {
+    // the "generated frames": laggy ghost copies. only the real one hurts.
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '10px monospace';
+    for (let k = 3; k >= 1; k--) {
+      const g = e.hist[k * 3]; if (!g) continue;
+      ctx.globalAlpha = 0.22; blob(e, g.x, g.y, '#c0f'); ctx.globalAlpha = 1;
+      if (k === 1) { ctx.fillStyle = '#fff'; ctx.fillText('GENERATED FRAME', g.x, g.y - e.r - 10); }
+    }
+    blob(e, e.x, e.y, e.flash ? '#fff' : '#6a0dad');
+    ctx.fillStyle = '#ffd700'; // crown
+    ctx.beginPath(); ctx.moveTo(e.x - 18, e.y - e.r + 2); ctx.lineTo(e.x - 18, e.y - e.r - 14); ctx.lineTo(e.x - 8, e.y - e.r - 5);
+    ctx.lineTo(e.x, e.y - e.r - 16); ctx.lineTo(e.x + 8, e.y - e.r - 5); ctx.lineTo(e.x + 18, e.y - e.r - 14); ctx.lineTo(e.x + 18, e.y - e.r + 2); ctx.fill();
+    ctx.fillStyle = '#0f0'; ctx.fillText('REAL FRAME', e.x, e.y + e.r + 12);
+    ctx.fillStyle = '#400'; ctx.fillRect(e.x - 30, e.y - e.r - 26, 60, 5);
+    ctx.fillStyle = '#f33'; ctx.fillRect(e.x - 30, e.y - e.r - 26, 60 * Math.max(0, e.hp / e.maxhp), 5);
+    return;
+  }
+  const col = e.flash ? '#fff' : e.stun > 0 ? '#e040fb' : e.kind === 'dodger' ? '#00bcd4' : e.kind === 'archer' ? '#ff9800' : e.kind === 'slop' ? `hsl(${(time * 300 + e.wob * 40) % 360},80%,55%)` : e.kind === 'hater' ? '#607d8b' : e.big ? '#7a1fa2' : '#c62828';
+  blob(e, e.x, e.y, col);
+  if (e.kind === 'archer') { // little bow facing the player
+    const a = Math.atan2(player.y - e.y, player.x - e.x);
+    ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 4, a - 0.9, a + 0.9); ctx.stroke();
+  } else if (e.kind === 'hater') { // protest sign
+    ctx.fillStyle = '#fff'; ctx.fillRect(e.x - 21, e.y - e.r - 22, 42, 13); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.strokeRect(e.x - 21, e.y - e.r - 22, 42, 13);
+    ctx.fillStyle = '#d00'; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('NO HOOK', e.x, e.y - e.r - 15);
+  } else if (e.kind === 'dodger') {
+    ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 2;
+    for (let k = -1; k <= 1; k++) { ctx.beginPath(); ctx.moveTo(e.x - e.r - 4, e.y + k * 5); ctx.lineTo(e.x - e.r - 14, e.y + k * 5); ctx.stroke(); }
+  } else if (e.kind === 'slop') { // wrong number of fingers, on purpose
+    ctx.strokeStyle = '#fcd'; ctx.lineWidth = 2;
+    for (let k = 0; k < 7; k++) { const a = -2.6 + k * 0.33; ctx.beginPath(); ctx.moveTo(e.x + Math.cos(a) * e.r, e.y + Math.sin(a) * e.r); ctx.lineTo(e.x + Math.cos(a) * (e.r + 7), e.y + Math.sin(a) * (e.r + 7)); ctx.stroke(); }
+    if (!e.child) { ctx.fillStyle = '#fff'; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('AI SLOP', e.x, e.y + e.r + 12); }
+  }
+}
+
+function drawPlayer(){
+  const p = player;
+  if (p.inv > 0 && Math.floor(time * 20) % 2) return;
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(p.x, p.y + 12, 12, 5, 0, 0, 6.28); ctx.fill();
+  ctx.fillStyle = '#3aa63a'; ctx.fillRect(p.x - 10, p.y - 6, 20, 20);
+  ctx.fillStyle = '#f2c9a0'; ctx.beginPath(); ctx.arc(p.x, p.y - 8, 9, 0, 6.28); ctx.fill();
+  ctx.fillStyle = '#2e8b2e'; ctx.beginPath(); ctx.moveTo(p.x - 10, p.y - 10); ctx.lineTo(p.x + 10, p.y - 10); ctx.lineTo(p.x + 14, p.y - 26); ctx.closePath(); ctx.fill();
+  const lx = Math.cos(p.face) * 2, ly = Math.sin(p.face) * 2;
+  ctx.fillStyle = '#000'; ctx.fillRect(p.x - 4 + lx, p.y - 8 + ly, 2, 3); ctx.fillRect(p.x + 2 + lx, p.y - 8 + ly, 2, 3);
+  // "DLSS 5 neural face": sparkle on the cheek
+  if (Math.floor(time * 4) % 2) { ctx.fillStyle = '#fff'; ctx.fillRect(p.x + 5, p.y - 12, 2, 2); ctx.fillRect(p.x + 4, p.y - 11, 4, 0.8); }
+
+  let a = p.swingT > 0 ? p.swingDir - 1.2 + (1 - p.swingT) * 2.4 : p.face;
+  const len = p.swingT > 0 ? SWORD_RANGE : 26;
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(a);
+  if (p.swingT > 0) { // rainbow swoosh, obviously
+    ctx.fillStyle = `hsla(${(time * 720) % 360},100%,70%,.5)`;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, len, -0.9, 0.1); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = '#8b5a2b'; ctx.fillRect(8, -2, 8, 4);
+  ctx.fillStyle = '#ffd54f'; ctx.fillRect(14, -6, 4, 12);
+  ctx.fillStyle = '#e8f4ff'; ctx.fillRect(18, -2.5, len - 12, 5);
+  ctx.fillStyle = '#fff'; ctx.fillRect(18, -1, len - 12, 1.5);
+  ctx.restore();
+}
+
+function drawHook(){
+  for (const s of eshots) {
+    ctx.fillStyle = s.r > 5 ? '#ff5722' : '#ffcc80'; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,200,100,.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx * 0.04, s.y - s.vy * 0.04); ctx.stroke();
+  }
+  for (const s of shots) {
+    ctx.strokeStyle = 'rgba(255,170,60,.6)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx * 0.03, s.y - s.vy * 0.03); ctx.stroke();
+    ctx.fillStyle = '#ffeb3b'; ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, 6.28); ctx.fill();
+  }
+  if (!hook) return;
+  const h = hook, p = player, it = ITEMS[h.type];
+  ctx.strokeStyle = it.color; ctx.lineWidth = h.type === 1 ? 4 : 3;
+  ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(h.x, h.y); ctx.stroke(); ctx.setLineDash([]);
+  ctx.save(); ctx.translate(h.x, h.y); ctx.rotate(Math.atan2(h.y - p.y, h.x - p.x));
+  ctx.fillStyle = it.color; ctx.strokeStyle = it.color; ctx.lineWidth = 3;
+  if (h.type === 2) { // claw: 3 prongs
+    for (const a of [-0.7, 0, 0.7]) { ctx.beginPath(); ctx.moveTo(-4, 0); ctx.lineTo(Math.cos(a) * 12, Math.sin(a) * 12); ctx.stroke(); }
+  } else {
+    const s = h.type === 1 ? 1.5 : 1;
+    ctx.beginPath(); ctx.moveTo(12 * s, 0); ctx.lineTo(-6 * s, -7 * s); ctx.lineTo(-6 * s, 7 * s); ctx.fill();
+    if (h.type === 1) { ctx.fillStyle = '#fff'; ctx.fillRect(-16, -2, 10, 4); } // longer. that's the whole upgrade.
+  }
+  ctx.restore();
+}
+
+function drawItem(it){
+  const bob = Math.sin(it.t * 6) * 2;
+  if (it.type === 'up') {
+    const d = ITEMS[it.slot];
+    ctx.fillStyle = `hsla(${(time * 400) % 360},100%,60%,.35)`; ctx.beginPath(); ctx.arc(it.x, it.y + bob, 17, 0, 6.28); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.fillRect(it.x - 10, it.y + bob - 10, 20, 20);
+    ctx.strokeStyle = d.color; ctx.lineWidth = 2; ctx.strokeRect(it.x - 10, it.y + bob - 10, 20, 20);
+    ctx.fillStyle = d.color; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(d.short[0] + '+', it.x, it.y + bob + 1);
+    return;
+  }
+  if (it.type === 'heart') {
+    ctx.fillStyle = '#ff3b5c';
+    ctx.beginPath(); ctx.arc(it.x - 4, it.y + bob - 2, 5, 0, 6.28); ctx.arc(it.x + 4, it.y + bob - 2, 5, 0, 6.28); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(it.x - 9, it.y + bob); ctx.lineTo(it.x + 9, it.y + bob); ctx.lineTo(it.x, it.y + bob + 10); ctx.fill();
+  } else {
+    ctx.fillStyle = it.type === 'blue' ? '#2196f3' : '#4caf50';
+    ctx.beginPath(); ctx.moveTo(it.x, it.y + bob - 8); ctx.lineTo(it.x + 6, it.y + bob); ctx.lineTo(it.x, it.y + bob + 8); ctx.lineTo(it.x - 6, it.y + bob); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.fillRect(it.x - 1, it.y + bob - 5, 2, 5);
+  }
+}
+
+// ---------- the "graphics tech" ----------
+const LABELS = [
+  '60 FPS', 'RAYTRACING', 'PATHTRACING', 'DLSS 5', '60FPS RAYTRAYING', 'PATHTRACING ON', 'DLSS 5 ULTRA', 'NEURAL RENDERING',
+  'RTX ON', '4K*', 'REAL-TIME GI', 'HOOKSHOT', 'LONGSHOT', 'CLAWSHOT', 'BACKSHOOTS', 'RECOMP', 'RECOMP OF A RECOMP',
+  'UPSTREAM: GONE', 'RC.1', 'RC.3', 'MFG 4X', 'TUNED BY EAR', 'ULTRAWIDE (4:3)', 'NO SHADER STUTTER', 'ZERO LATENCY*',
+  'PR #840', 'VULKAN', 'NATIVE 60FPS', 'SHOTS FIRED', 'LEGALLY DISTINCT', 'HOOK IT UP', 'LONGER', 'CLAW IT BACK',
+];
+let flashers = [], nextFlash = 0;
+function spawnFlasher(){
+  flashers.push({ text: (factionMode && Math.random() < 0.5) ? pick(FACTION_LABELS[factionMode]) : pick(LABELS), x: rnd(80, W - 80), y: rnd(60, H - 40), rot: rnd(-0.4, 0.4), size: rnd(18, 54), life: rnd(0.5, 1.5), age: 0, hue: rnd(0, 360) });
+}
+function drawFlashers(dt){
+  nextFlash -= dt;
+  while (nextFlash <= 0) { spawnFlasher(); nextFlash += rnd(0.08, 0.25); }
+  for (const f of flashers) f.age += dt;
+  flashers = flashers.filter(f => f.age < f.life);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const f of flashers) {
+    if (Math.floor(f.age * 14) % 2) continue;
+    ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.rot);
+    ctx.font = `bold ${f.size}px Impact, "Comic Sans MS", sans-serif`;
+    ctx.lineWidth = 6; ctx.strokeStyle = '#000'; ctx.strokeText(f.text, 0, 0);
+    ctx.fillStyle = `hsl(${(f.hue + time * 600) % 360},100%,60%)`; ctx.fillText(f.text, 0, 0);
+    ctx.restore();
+  }
+}
+
+function drawBadges(){
+  ctx.textBaseline = 'top'; ctx.textAlign = 'right';
+  const lines = ['60 FPS', 'RAYTRACING', 'PATHTRACING', 'DLSS 5'];
+  lines.forEach((t, i) => {
+    if (Math.floor(time * 6 + i) % 3 === 0) return;
+    ctx.font = 'bold 22px Impact, sans-serif'; ctx.lineWidth = 4; ctx.strokeStyle = '#000';
+    const y = 6 + i * 26;
+    ctx.strokeText(t + ' ✔', W - 10, y);
+    ctx.fillStyle = `hsl(${(time * 360 + i * 90) % 360},100%,60%)`; ctx.fillText(t + ' ✔', W - 10, y);
+  });
+  ctx.font = '14px monospace'; ctx.fillStyle = '#0f0'; ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
+  ctx.strokeText('FPS: 60.0 (locked, trust me)', W - 10, 112);
+  ctx.fillText('FPS: 60.0 (locked, trust me)', W - 10, 112);
+}
+
+function drawTitle(){
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.save(); ctx.translate(W/2, 4); ctx.rotate(Math.sin(time * 3) * 0.02);
+  ctx.font = 'bold 34px Impact, sans-serif'; ctx.lineWidth = 6; ctx.strokeStyle = '#000';
+  ctx.strokeText('BACKSHOOTS', 0, 0);
+  ctx.fillStyle = `hsl(${(time * 200) % 360},100%,60%)`; ctx.fillText('BACKSHOOTS', 0, 0);
+  ctx.font = '12px "Comic Sans MS", sans-serif'; ctx.lineWidth = 3;
+  const sub = 'Hookshot • Longshot • Clawshot • Backshoots';
+  ctx.strokeText(sub, 0, 40); ctx.fillStyle = '#fff'; ctx.fillText(sub, 0, 40);
+  ctx.restore();
+}
+
+function drawToast(){
+  if (!toast) return;
+  const a = Math.min(1, toast.t * 4, (3.2 - toast.t) * 4);
+  ctx.globalAlpha = Math.max(0, a);
+  ctx.font = '14px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const w = ctx.measureText(toast.text).width + 24;
+  ctx.fillStyle = 'rgba(20,20,20,.85)'; ctx.fillRect(W/2 - w/2, 72, w, 26);
+  ctx.strokeStyle = '#0f0'; ctx.lineWidth = 1; ctx.strokeRect(W/2 - w/2, 72, w, 26);
+  ctx.fillStyle = '#0f0'; ctx.fillText('⚠ ' + toast.text, W/2, 86);
+  ctx.globalAlpha = 1;
+}
+
+function postFX(){
+  const p = player;
+  ctx.globalCompositeOperation = 'lighter';
+  let g = ctx.createRadialGradient(p.x, p.y, 5, p.x, p.y, 200);
+  g.addColorStop(0, 'rgba(255,220,150,.35)'); g.addColorStop(1, 'rgba(255,220,150,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const sx = W/2 + Math.cos(time * 0.7) * 300, sy = 130 + Math.sin(time * 0.7) * 40;
+  g = ctx.createRadialGradient(sx, sy, 0, sx, sy, 260);
+  g.addColorStop(0, 'rgba(255,255,200,.45)'); g.addColorStop(1, 'rgba(255,255,200,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let i = 1; i <= 5; i++) {
+    const fx = sx + (W/2 - sx) * i * 0.35, fy = sy + (H/2 - sy) * i * 0.35;
+    ctx.fillStyle = `hsla(${i * 60},100%,60%,.15)`;
+    ctx.beginPath(); ctx.arc(fx, fy, 10 + i * 8, 0, 6.28); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 0.12; ctx.fillStyle = '#9cf'; ctx.fillRect(0, H - 14, W, 14); ctx.globalAlpha = 1;
+
+  g = ctx.createRadialGradient(W/2, H/2, H * 0.35, W/2, H/2, H * 0.9);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.55)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = 'rgba(0,0,0,.08)';
+  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+  for (let i = 0; i < 60; i++) {
+    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.5})`;
+    ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2);
+  }
+  ctx.fillStyle = 'rgba(255,0,0,.04)'; ctx.fillRect(0, 0, 6, H);
+  ctx.fillStyle = 'rgba(0,120,255,.04)'; ctx.fillRect(W - 6, 0, 6, H);
+}
+
+function frameGenGhosting(){
+  if (glitchT <= 0) return;
+  // frame generation: blend the previous "frames" back on top, smeared
+  ctx.globalAlpha = 0.3; ctx.drawImage(cv, Math.sin(time * 40) * 14, 0);
+  ctx.globalAlpha = 0.2; ctx.drawImage(cv, -10, 4);
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 28px Impact, sans-serif'; ctx.lineWidth = 5; ctx.strokeStyle = '#000'; ctx.fillStyle = '#0ff';
+  ctx.strokeText('MFG 4X: 3 FRAMES ARE FAKE', W/2, H/2 + 90); ctx.fillText('MFG 4X: 3 FRAMES ARE FAKE', W/2, H/2 + 90);
+}
+
+function drawHeart(x, y, s){
+  ctx.beginPath(); ctx.arc(x - s/2, y - s/4, s/2, 0, 6.28); ctx.arc(x + s/2, y - s/4, s/2, 0, 6.28); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x - s, y - s/6); ctx.lineTo(x + s, y - s/6); ctx.lineTo(x, y + s); ctx.fill();
+}
+
+function drawHUD(){
+  for (let i = 0; i < player.maxhp / 2; i++) {
+    const hp = player.hp - i * 2;
+    const x = 20 + i * 28, y = 22;
+    ctx.fillStyle = '#400'; drawHeart(x, y, 11);
+    if (hp >= 2) { ctx.fillStyle = '#ff3b5c'; drawHeart(x, y, 11); }
+    else if (hp === 1) { ctx.fillStyle = '#ff3b5c'; ctx.save(); ctx.beginPath(); ctx.rect(x - 14, y - 14, 14, 30); ctx.clip(); drawHeart(x, y, 11); ctx.restore(); }
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = 'bold 20px "Comic Sans MS", sans-serif';
+  ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.fillStyle = '#6f6';
+  ctx.strokeText('◆ ' + score, 16, 42); ctx.fillText('◆ ' + score, 16, 42);
+  ctx.fillStyle = '#fff'; ctx.strokeText('Wave ' + wave, 16, 68); ctx.fillText('Wave ' + wave, 16, 68);
+
+  // item bar
+  ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ITEMS.forEach((it, i) => {
+    const x = 12 + i * 70, y = H - 46, on = i === sel;
+    ctx.fillStyle = on ? 'rgba(0,0,0,.85)' : 'rgba(0,0,0,.5)'; ctx.fillRect(x, y, 64, 34);
+    ctx.strokeStyle = on ? it.color : '#555'; ctx.lineWidth = on ? 3 : 1; ctx.strokeRect(x, y, 64, 34);
+    ctx.fillStyle = it.color; ctx.fillText(it.short, x + 32, y + 12);
+    ctx.fillStyle = '#aaa'; ctx.fillText('[' + (i + 1) + ']', x + 32, y + 26);
+    for (let l = 0; l < it.lvl; l++) { ctx.fillStyle = it.color; ctx.fillRect(x + 4 + l * 8, y + 3, 6, 4); }
+    if (on && itemCd > 0) { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(x, y + 34 - 34 * (itemCd / it.cd), 64, 34 * (itemCd / it.cd)); }
+  });
+}
+
+
+// enemies get a pulsing ring + arrow drawn on top of every effect, so they never get lost in the label spam
+function drawEnemyMarkers(){
+  if (state !== 'play') return;
+  ctx.save(); applyZoom();
+  for (const e of enemies) {
+    if (e.dead) continue;
+    const pulse = 0.5 + 0.5 * Math.sin(time * 10 + e.wob);
+    ctx.strokeStyle = e.boss ? '#f0f' : '#ff0'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 5 + pulse * 3, 0, 6.28); ctx.stroke();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 8 + pulse * 3, 0, 6.28); ctx.stroke();
+    const ay = e.y - e.r - 14 - pulse * 3 - (e.boss ? 18 : 0);
+    ctx.fillStyle = e.boss ? '#f0f' : '#ff0'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(e.x, ay + 8); ctx.lineTo(e.x - 6, ay - 3); ctx.lineTo(e.x + 6, ay - 3); ctx.closePath(); ctx.stroke(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// =====================================================================
+//  v4 feature block: drama, emulator wars, modals, settings, bosses...
+// =====================================================================
+
+// ---------- more content: emulators, forks and drama ----------
+LABELS.push('LICHII', 'FRICHTI', 'DRAMA', 'FORK OF A FORK', 'SPIRITUAL SUCCESSOR', 'NOT A FORK', 'LICHII > FRICHTI', 'FRICHTI > LICHII',
+  'ROADMAP DISCUSSION', 'WONTFIX', 'WORKS ON MY MACHINE', 'README: ORIGINAL', 'PR #840', 'LINUX DLSS');
+TOASTS.push('Lichii: branch oot-dlss-new rebased (again)', 'Frichti: "this is not a fork" (it is a fork)', 'Lichii dev is typing...', 'Frichti dev is typing...',
+  'New fork detected: Frichti-but-better', 'Reminder: Lichii and Frichti share 94% of their README');
+DEATH.push('Lichii would have saved you. Frichti would have forked you.', 'died while the emulator devs argued', 'Frichti dev: "not my bug"');
+COMMENTS.push(
+  'Lichii runs OoT better than Frichti, fight me',
+  'Frichti is just Lichii with a new logo',
+  'Frichti devs just forked Lichii again',
+  'Lichii: DLSS-G only on Windows. Linux gang, rise up',
+  'PR #840 Linux DLSS when? oh wait, it is merged. by us.',
+  'Frichti last commit: "fix". 4000 lines changed.',
+  'Lichii vs Frichti vs Hookshot vs Longshot: pick a side, there is no neutral',
+  'why does every emulator have 3 forks and 0 docs',
+  'tried Lichii, tried Frichti, now I just play Backshoots',
+  'Lichii dev left the Discord. again.',
+  'Frichti works fine on my 128GB RAM double 5090 Ti',
+  'Lichii works fine on my 128GB RAM double 5090 Ti too, stop asking',
+  'Frichti is not a fork. Frichti is a spiritual successor. I read the README.',
+  'who needs an emulator when you have a recomp? me. i need both.',
+  'is Frichti better than Lichii? the answer depends on who you ask. and the answer is always yes.',
+  'what is the difference between Lichii and Frichti? 3 commits and a color scheme',
+  'my Lichii saves do not work in Frichti. the devs say "working as intended"',
+  'the Zelda recomp scene is just 5 people arguing in a trench coat',
+  'Hookshot, Longshot, Clawshot, Lichii, Frichti: every month a new fork, every month the same issue',
+  'my GitHub notifications are 90% drama and 10% bug reports',
+  'upstream is gone. downstream is also gone. midstream is the problem.',
+  'every emulator discord: 1 dev, 40 moderators, 0 docs',
+  'Frichti Discord banned me for saying "Lichii". I did not even say it with a capital L',
+  'Lichii dev vs Frichti dev: rematch. I paid for the pay-per-view',
+);
+const HOT_TITLES = [
+  '[MEGATHREAD] Hookshot vs Longshot (again)', 'PSA: stop asking about Backshoots', 'Clawshot rc.2 when?? (day 412)',
+  'I benchmarked the 60 FPS counter. It is 60 FPS.', 'Longshot dev is dead. Long live Longshot.', 'My 5090 Ti caught fire, worth it',
+  'Weekly Hookshot Hater Support Group thread', 'Mods have been replaced by a Longshot bot', 'Lichii vs Frichti: the megathread to end all megathreads',
+  'Frichti dev responds to Lichii dev (28 paragraphs)', 'Lichii dev "taking a break" (day 3)', 'It is not drama. It is a roadmap discussion.',
+  'Frichti: "we are NOT a fork" - screenshot of the fork button', 'Who forked who? A flowchart (12k upvotes)',
+];
+let hot = null, nextHot = 12;
+function drawHot(){
+  if (!hot) return;
+  const T = 5, t = hot.t; let x = 20;
+  if (t < 0.4) { const k = t / 0.4; x = -580 + 600 * (1 - (1 - k) * (1 - k)); }
+  else if (t > T - 0.4) { const k = (t - (T - 0.4)) / 0.4; x = 20 + W * k * k; }
+  const y = 104, w = 560, h = 32;
+  ctx.fillStyle = 'rgba(26,26,27,.92)'; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#ff4500'; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = '#ff4500'; ctx.fillRect(x, y, 52, h);
+  ctx.font = 'bold 13px "Segoe UI", sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.fillText('HOT', x + 26, y + h / 2);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#ff8b60'; ctx.fillText('▲ ' + hot.score, x + 60, y + h / 2);
+  ctx.fillStyle = '#d7dadc'; ctx.fillText(hot.title, x + 122, y + h / 2);
+  ctx.textAlign = 'right'; ctx.font = '10px "Segoe UI", sans-serif'; ctx.fillStyle = '#818384'; ctx.fillText(hot.comments + ' comments', x + w - 8, y + h / 2);
+}
+
+// ---------- DRAMA ----------
+const DRAMA_HEADLINES = [
+  'BREAKING: Frichti dev announces Frichti is "not a Lichii fork" (it is a Lichii fork)',
+  'Lichii dev has left the Discord. Again. (3rd time this week)',
+  'Frichti and Lichii maintainers now "taking a break" from each other',
+  'GitHub issue on Longshot: "Hookshot was better" - closed, locked, pinned',
+  'Hookshot v2.2.0-rc.1 declared "upstream gone"; fork war begins',
+  'Clawshot dev replies "wontfix" to every issue, including the compliments',
+  'Both emulators claim to be "the original". Neither has a release.',
+  'Lichii drops 4000-line commit titled "fix". Frichti reviews it in 4 minutes.',
+  'Reddit mods lock thread about the locked thread',
+  'Frichti forks Lichii. Lichii forks Frichti. The universe is now a loop.',
+  'RUMOR: a new emulator called "Frichtii" is coming. Nobody asked.',
+  'Backshoots dev refuses to comment. Backshoots has no dev.',
+  'Mods say: "we are a fan community for hooks and chains, nothing else"',
+  'Hookshot, Longshot, Clawshot, Lichii, Frichti: developers agree on nothing, merge nothing',
+  'Lichii dev: "I am not mad." Lichii dev has 14 unread DMs and 3 new repos.',
+];
+const DISCORD_CONVOS = [
+  [['lichii-dev', 'this is not drama, this is a "roadmap discussion"'], ['frichti-dev', 'we are not a fork, we are a spiritual successor'], ['lichii-dev', 'you literally copied my README']],
+  [['frichti-dev', 'I improved the README (fixed 2 typos)'], ['lichii-dev', 'you changed my name to yours in 41 places'], ['mod', 'please keep it civil']],
+  [['hookshot-enjoyer', 'hookshot sucks'], ['longshot-bot', 'upstream: gone'], ['clawshot-dev', 'wontfix']],
+  [['lichii-dev', 'my emulator, my rules, my DLSS'], ['frichti-dev', 'my emulator is just your emulator but better'], ['mod', 'both of you are banned for 5 minutes']],
+];
+const DRAMA_COMMENTS = [
+  'grab the popcorn, Lichii and Frichti are at it again',
+  'best soap opera since the Hookshot/Longshot war',
+  'Frichti dev typing... Frichti dev stopped typing... Frichti dev typing...',
+  'unsubscribe from the drama? never. subscribed.',
+  'both sides have a point and both sides are wrong',
+  'someone made a Discord server about the Discord server',
+  'I just wanted to play Zelda at 60 fps (it was always 60)',
+  'who is the real original? the README says "original" in 3 places on each',
+  'this is peak content. I am not leaving',
+  'ratio + both devs + upstream is gone',
+];
+let drama = null, nextDrama = 25, discord = null;
+function wrapText(text, maxW){
+  const words = text.split(' '), lines = []; let cur = '';
+  for (const w of words) {
+    const t = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+  }
+  lines.push(cur); return lines;
+}
+function startDrama(){
+  const text = pick(DRAMA_HEADLINES);
+  ctx.font = 'bold 14px "Segoe UI", sans-serif';
+  const tw = ctx.measureText(text).width;
+  drama = { text, tw, t: 0, len: (W + tw) / 110 + 1 };
+  nextDrama = rnd(28, 45);
+  beep(880, 0.12, 'square', 0.06); setTimeout(() => beep(660, 0.2, 'square', 0.06), 140);
+  popup(W/2, H/2 + 40, 'DRAMA ALERT', '#f33');
+  ctx.font = '11px "Segoe UI", sans-serif';
+  const msgs = pick(DISCORD_CONVOS).map(([u, t]) => ({ u, lines: wrapText(t, 230) }));
+  discord = { msgs, t: 0, h: 22 + msgs.reduce((a, m) => a + 14 * m.lines.length + 4, 0) };
+  for (let i = 0; i < 4; i++) setTimeout(() => spawnComment(pick(DRAMA_COMMENTS)), 400 + i * 700);
+}
+function updateDrama(dt){
+  if (state === 'play' && !menuOpen && !modal) nextDrama -= dt;
+  if (nextDrama <= 0 && state === 'play' && !drama) startDrama();
+  if (drama) { drama.t += dt; if (drama.t > drama.len) drama = null; }
+  if (discord) { discord.t += dt; if (discord.t > 7) discord = null; }
+}
+function hashHue(s){ let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h) % 360; }
+function drawDrama(){
+  if (drama) {
+    const y = H - 78, h = 24;
+    ctx.fillStyle = 'rgba(110,0,0,.9)'; ctx.fillRect(0, y, W, h);
+    ctx.fillStyle = '#f33'; ctx.fillRect(0, y, W, 2);
+    ctx.save(); ctx.beginPath(); ctx.rect(86, y, W - 86, h); ctx.clip();
+    ctx.font = 'bold 14px "Segoe UI", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+    ctx.fillText(drama.text, W - drama.t * 110, y + h / 2 + 1);
+    ctx.restore();
+    ctx.fillStyle = Math.floor(time * 4) % 2 ? '#f33' : '#900'; ctx.fillRect(0, y, 86, h);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px Impact, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('DRAMA', 43, y + h / 2 + 1);
+  }
+  if (discord) {
+    const d = discord; let x = 10;
+    if (d.t < 0.4) x = -300 + 310 * (1 - Math.pow(1 - d.t / 0.4, 2));
+    else if (d.t > 6.6) x = 10 - 310 * Math.pow((d.t - 6.6) / 0.4, 2);
+    const y = 140, w = 280;
+    ctx.fillStyle = 'rgba(43,45,49,.94)'; ctx.fillRect(x, y, w, d.h);
+    ctx.fillStyle = '#1e1f22'; ctx.fillRect(x, y, w, 18);
+    ctx.font = 'bold 11px "Segoe UI", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#b5bac1';
+    ctx.fillText('# drama-general', x + 8, y + 3);
+    let yy = y + 22;
+    d.msgs.forEach((m, i) => {
+      if (d.t < 0.5 + i * 1.2) return;
+      ctx.font = 'bold 11px "Segoe UI", sans-serif'; ctx.fillStyle = `hsl(${hashHue(m.u)},70%,68%)`; ctx.fillText(m.u, x + 8, yy);
+      ctx.font = '11px "Segoe UI", sans-serif'; ctx.fillStyle = '#dbdee1';
+      m.lines.forEach((l, j) => ctx.fillText(l, x + 8 + ctx.measureText(m.u + ' ').width * (j === 0 ? 1.0 : 0) * 0, yy + 14 * (j + 0) + (j === 0 ? 0 : 0) + 0));
+      yy += 14 * m.lines.length + 4;
+    });
+  }
+}
+
+// ---------- chiptune + comment babble ----------
+const MELODY = [0, 3, 5, 7, 10, 7, 5, 3, 0, 3, 7, 12, 10, 7, 5, 3, 5, 7, 8, 10, 12, 10, 8, 7, 3, 5, 7, 5, 3, 0, -2, 0];
+const BASS = [0, 0, -4, -4, -2, -2, -5, -5];
+let musicStep = 0, musicT = 0;
+function updateMusic(dt){
+  if (!ac || !musicOn || state === 'dead') return;
+  musicT += dt;
+  while (musicT >= 0.15) {
+    musicT -= 0.15;
+    beep(220 * Math.pow(2, MELODY[musicStep % 32] / 12), 0.12, 'square', 0.016);
+    if (musicStep % 4 === 0) beep(110 * Math.pow(2, BASS[(musicStep >> 2) % 8] / 12), 0.3, 'triangle', 0.03);
+    musicStep++;
+  }
+}
+function babble(){ if (!ac || !musicOn) return; for (let i = 0; i < 3; i++) setTimeout(() => beep(rnd(250, 700), 0.05, 'triangle', 0.025), i * 55); }
+
+// ---------- DLSS 5 moments (slow-mo + zoom + "8K upscale") ----------
+function applyZoom(){
+  if (slow > 0) { const z = 1 + 0.22 * Math.sin(Math.PI * (1 - slow / 1.2)); ctx.translate(player.x, player.y); ctx.scale(z, z); ctx.translate(-player.x, -player.y); }
+}
+function dlssMoment(){ slow = 1.2; popup(W/2, H/2 - 130, 'NEURAL UPSCALE 8K', '#0ff'); beep(300, 0.5, 'sawtooth', 0.07, 900); }
+function drawDLSSMoment(){
+  if (slow <= 0) return;
+  const k = slow / 1.2;
+  ctx.fillStyle = 'rgba(255,255,255,' + Math.max(0, (k - 0.75) * 1.2) + ')'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 40px Impact, sans-serif'; ctx.lineWidth = 6; ctx.strokeStyle = '#000'; ctx.fillStyle = '#0ff';
+  ctx.strokeText('NEURAL UPSCALE 8K', W/2, H/2 + 110); ctx.fillText('NEURAL UPSCALE 8K', W/2, H/2 + 110);
+  ctx.font = '14px monospace'; ctx.fillStyle = '#fff'; ctx.fillText('AI-generated details: 100% fabricated', W/2, H/2 + 140);
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < 18; i++) { const sx = rnd(0, W), sy = rnd(0, H); ctx.fillRect(sx - 6, sy, 12, 2); ctx.fillRect(sx, sy - 6, 2, 12); }
+}
+
+// ---------- weapon upgrades ----------
+function upgrade(slot){
+  const d = ITEMS[slot], p = player;
+  if (d.lvl >= 3) { score += 5; popup(p.x, p.y - 30, d.name + ' MAXED (+5)', d.color); beep(1200, 0.1, 'triangle', 0.07); return; }
+  d.lvl++;
+  popup(p.x, p.y - 36, d.name + ' MK ' + ['I', 'II', 'III', 'IV'][d.lvl], d.color);
+  popup(p.x, p.y - 14, slot === 3 ? '+2 PELLETS' : '+25% RANGE' + (d.lvl >= 2 ? ', +1 DMG' : ''), '#fff');
+  beep(600, 0.1, 'triangle', 0.08, 300); setTimeout(() => beep(900, 0.1, 'triangle', 0.08, 300), 100); setTimeout(() => beep(1200, 0.2, 'triangle', 0.08, 300), 200);
+}
+
+// ---------- enemy behaviour ----------
+function moveEnemy(e, ex, ey, d, dt){
+  const sp = e.speed * 60 * dt;
+  if (e.kind === 'archer') {
+    const dir = d > 230 ? 1 : d < 160 ? -1 : 0;
+    e.x += ex / d * sp * dir + (-ey / d) * sp * 0.5; e.y += ey / d * sp * dir + (ex / d) * sp * 0.5;
+    e.shootT -= dt;
+    if (e.shootT <= 0) { e.shootT = rnd(1.6, 2.6); eshots.push({ x: e.x, y: e.y, vx: ex / d * 260, vy: ey / d * 260, life: 2.5, r: 4, dmg: 1 }); beep(400, 0.08, 'square', 0.04, -150); }
+  } else if (e.kind === 'dodger') {
+    if (e.dodgeCd > 0) e.dodgeCd -= dt;
+    if (e.dodgeT > 0) { e.dodgeT -= dt; e.x += e.dvx * dt; e.y += e.dvy * dt; return; }
+    const threat = e.dodgeCd <= 0 && ((hook && hook.state === 'out' && Math.hypot(hook.x - e.x, hook.y - e.y) < 140) || (player.swingT > 0 && d < 90));
+    if (threat) {
+      const hx = hook ? hook.dx : ex / d, hy = hook ? hook.dy : ey / d, side = Math.random() < 0.5 ? 1 : -1;
+      e.dvx = -hy * side * 420; e.dvy = hx * side * 420; e.dodgeT = 0.25; e.dodgeCd = 1.0; popup(e.x, e.y - 22, 'dodge!', '#0ff');
+    } else { e.x += ex / d * sp; e.y += ey / d * sp; }
+  } else if (e.kind === 'dragon') {
+    e.x += ex / d * sp; e.y += ey / d * sp;
+    e.phaseT -= dt;
+    if (e.noisy) e.noiseP = Math.max(0, Math.min(1, 1 - e.phaseT / 2.2));
+    if (e.phaseT <= 0) {
+      e.noisy = !e.noisy; e.phaseT = e.noisy ? 2.2 : 3.2;
+      if (!e.noisy) { popup(e.x, e.y - 56, 'DENOISED!', '#0ff'); beep(900, 0.15, 'triangle', 0.07, 500); } else popup(e.x, e.y - 56, 'DENOISING...', '#aaa');
+    }
+    e.shootT -= dt;
+    if (e.shootT <= 0) {
+      e.shootT = 2.4;
+      for (let k = -1; k <= 1; k++) { const a = Math.atan2(ey, ex) + k * 0.3; eshots.push({ x: e.x, y: e.y, vx: Math.cos(a) * 220, vy: Math.sin(a) * 220, life: 3, r: 7, dmg: 1 }); }
+      beep(150, 0.2, 'sawtooth', 0.06, -60);
+    }
+  } else { e.x += ex / d * sp; e.y += ey / d * sp; }
+}
+
+function drawDragonBody(e, x, y, ghost){
+  ctx.save(); ctx.translate(x, y);
+  const flap = Math.sin(time * 8) * 12;
+  ctx.fillStyle = ghost ? 'rgba(0,150,136,.2)' : '#00695c';
+  ctx.beginPath(); ctx.moveTo(-10, -6); ctx.lineTo(-52, -26 + flap); ctx.lineTo(-40, 10); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(10, -6); ctx.lineTo(52, -26 + flap); ctx.lineTo(40, 10); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = ghost ? 'rgba(0,200,180,.2)' : (e.flash ? '#fff' : '#00897b');
+  ctx.beginPath(); ctx.arc(0, 0, e.r, 0, 6.28); ctx.fill();
+  if (!ghost) {
+    ctx.fillStyle = '#ffeb3b'; ctx.fillRect(-14, -10, 8, 8); ctx.fillRect(6, -10, 8, 8);
+    ctx.fillStyle = '#000'; ctx.fillRect(-11, -7, 3, 3); ctx.fillRect(9, -7, 3, 3);
+    ctx.fillStyle = '#eee';
+    ctx.beginPath(); ctx.moveTo(-18, -24); ctx.lineTo(-12, -38); ctx.lineTo(-6, -26); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(18, -24); ctx.lineTo(12, -38); ctx.lineTo(6, -26); ctx.fill();
+    if (e.noisy) {
+      for (let i = 0; i < 70; i++) {
+        const a = Math.random() * 6.28, rr = Math.sqrt(Math.random()) * e.r * 1.3;
+        ctx.fillStyle = pick(['#fff', '#888', '#0ff', '#f0f', '#000']); ctx.fillRect(Math.cos(a) * rr, Math.sin(a) * rr, 3, 3);
+      }
+    }
+  }
+  ctx.restore();
+}
+function drawDragon(e){
+  for (let k = 3; k >= 1; k--) { const g = e.hist[k * 3]; if (g) drawDragonBody(e, g.x, g.y, true); }
+  drawDragonBody(e, e.x, e.y, false);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 11px monospace';
+  ctx.fillStyle = e.noisy ? '#ccc' : '#0ff';
+  ctx.fillText(e.noisy ? 'DENOISING ' + Math.floor(e.noiseP * 100) + '% (INVULNERABLE)' : 'DENOISED: HIT ME', e.x, e.y + e.r + 14);
+  ctx.fillStyle = '#400'; ctx.fillRect(e.x - 34, e.y - e.r - 34, 68, 6);
+  ctx.fillStyle = '#f33'; ctx.fillRect(e.x - 34, e.y - e.r - 34, 68 * Math.max(0, e.hp / e.maxhp), 6);
+}
+
+// ---------- player damage / death / leaderboard ----------
+function damagePlayer(n, vx, vy){
+  const p = player; p.hp -= n; p.inv = 1; shake = 12;
+  const l = Math.hypot(vx, vy) || 1; p.vx = vx / l * 6; p.vy = vy / l * 6;
+  beep(120, 0.25, 'sawtooth', 0.08, -60); spawnParts(p.x, p.y, '#f44', 14);
+  if (p.hp <= 0) playerDied();
+}
+function playerDied(){
+  player.hp = 0; state = 'dead'; deathLine = pick(DEATH); say('dead', true);
+  beep(80, 0.8, 'sawtooth', 0.1, -50); saveScore();
+}
+function loadScores(){
+  try { const v = JSON.parse(localStorage.getItem('backshoots.scores') || '[]'); return Array.isArray(v) ? v : []; } catch (err) { return []; }
+}
+function saveScore(){
+  const list = loadScores(), me = { name: myName, score, wave, kills };
+  list.push(me); list.sort((a, b) => b.score - a.score || b.wave - a.wave);
+  runRank = list.indexOf(me) + 1; boardCache = list.slice(0, 5); lastRank = boardCache.indexOf(me);
+  try { localStorage.setItem('backshoots.scores', JSON.stringify(list.slice(0, 20))); } catch (err) {}
+}
+
+// ---------- faction meter ----------
+function updateFaction(dt){
+  faction -= Math.sign(faction) * Math.min(Math.abs(faction), 0.03 * dt);
+  let m = factionMode;
+  if (faction <= -0.8) m = 'hook'; else if (faction >= 0.8) m = 'long'; else if (Math.abs(faction) < 0.6) m = null;
+  if (m && m !== factionMode) {
+    popup(W/2, H/2 - 100, m === 'hook' ? 'FACTION WAR: HOOKSHOT SUPREMACY' : 'FACTION WAR: LONGSHOT SUPREMACY', '#f33');
+    for (let i = 0; i < 3; i++) setTimeout(() => spawnComment(pick(HOSTILE[m])), i * 350);
+    beep(200, 0.4, 'sawtooth', 0.09, -100);
+  }
+  factionMode = m;
+}
+function drawFaction(){
+  const x = 330, y = H - 30, w = 220, h = 12;
+  if (factionMode) {
+    ctx.strokeStyle = factionMode === 'hook' ? 'rgba(255,120,0,.55)' : 'rgba(255,215,0,.55)'; ctx.lineWidth = 12; ctx.strokeRect(0, 0, W, H);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(x - 4, y - 16, w + 8, h + 32);
+  if (factionMode && Math.floor(time * 6) % 2) { ctx.strokeStyle = '#f33'; ctx.lineWidth = 2; ctx.strokeRect(x - 4, y - 16, w + 8, h + 32); }
+  ctx.fillStyle = '#ef6c00'; ctx.fillRect(x, y, w / 2, h); ctx.fillStyle = '#ffd54f'; ctx.fillRect(x + w / 2, y, w / 2, h);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x + w / 2 + faction * w / 2 - 3, y - 4, 6, h + 8);
+  ctx.font = '9px monospace'; ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.fillStyle = '#ffb74d'; ctx.fillText('HOOKSHOT', x, y + h + 3);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#fff59d'; ctx.fillText('LONGSHOT', x + w, y + h + 3);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#aaa'; ctx.fillText('FACTION WAR', x + w / 2, y - 13);
+}
+
+// ---------- fake Windows dialogs ----------
+const MODAL_BTNS = [{ x: 250, y: 335, w: 130, h: 28 }, { x: 420, y: 335, w: 130, h: 28 }];
+function startModal(kind){
+  modal = { kind, t: 0 };
+  if (kind === 'crash') { beep(440, 0.25, 'square', 0.08, -300); setTimeout(() => beep(330, 0.3, 'square', 0.08, -200), 200); }
+  else beep(660, 0.15, 'triangle', 0.08, 200);
+}
+function endModal(clicked){
+  const k = modal && modal.kind; modal = null;
+  if (k === 'crash') { popup(W/2, H/2 - 60, 'Recovered. Nothing was wrong.', '#0f0'); spawnComment('crashed? works on my machine'); }
+  else if (k === 'virus') { popup(W/2, H/2 - 60, clicked ? 'Ran anyway. Nothing happened. (probably)' : 'Scan closed. 3/70 is fine, right?', '#fff'); spawnComment('is this clean?'); }
+  else popup(W/2, H/2 - 60, clicked ? 'Installing Longshot rc.4... (nothing happened)' : 'Update postponed (upstream: gone)', '#fff');
+}
+function modalClick(){
+  for (const b of MODAL_BTNS) if (mouse.x >= b.x && mouse.x <= b.x + b.w && mouse.y >= b.y && mouse.y <= b.y + b.h) { endModal(true); return; }
+}
+function bevel(x, y, w, h){
+  ctx.fillStyle = '#c0c0c0'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x, y, w, 2); ctx.fillRect(x, y, 2, h);
+  ctx.fillStyle = '#404040'; ctx.fillRect(x, y + h - 2, w, 2); ctx.fillRect(x + w - 2, y, 2, h);
+  ctx.fillStyle = '#808080'; ctx.fillRect(x + 2, y + h - 4, w - 4, 2); ctx.fillRect(x + w - 4, y + 2, 2, h - 4);
+}
+function drawModal(){
+  if (!modal) return;
+  const x = 210, y = 190, w = 380, h = 190, crash = modal.kind === 'crash';
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H);
+  bevel(x, y, w, h);
+  const g = ctx.createLinearGradient(x, 0, x + w, 0); g.addColorStop(0, '#000080'); g.addColorStop(1, '#1084d0');
+  ctx.fillStyle = g; ctx.fillRect(x + 4, y + 4, w - 8, 20);
+  ctx.font = 'bold 12px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+  ctx.fillText(modal.kind === 'virus' ? 'VirusTotal - Longshot_FINAL_v2.exe' : crash ? 'Longshot.exe' : 'Backshoots Updater', x + 10, y + 14);
+  bevel(x + w - 24, y + 6, 16, 16); ctx.fillStyle = '#000'; ctx.fillText('x', x + w - 20, y + 14);
+  ctx.fillStyle = '#000'; ctx.font = '13px Arial, sans-serif';
+  if (modal.kind === 'virus') {
+    ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.moveTo(x + 40, y + 42); ctx.lineTo(x + 62, y + 52); ctx.lineTo(x + 58, y + 78); ctx.lineTo(x + 40, y + 90); ctx.lineTo(x + 22, y + 78); ctx.lineTo(x + 18, y + 52); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 20px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('3', x + 40, y + 66); ctx.textAlign = 'left';
+    ctx.fillStyle = '#000'; ctx.font = 'bold 13px Arial, sans-serif'; ctx.fillText('3 / 70 security vendors flagged this file', x + 74, y + 46);
+    ctx.font = '12px Arial, sans-serif';
+    const eng = [['Kaspersky', 'Trojan.Win32.UpstreamGone', '#c00'], ['Defender', 'Clean (trust me)', '#080'], ['AI-Slop-Detect', '100% slop', '#c00'], ['Everyone else', 'lol', '#c60']];
+    eng.forEach(([n, r, c], i) => { ctx.fillStyle = '#000'; ctx.fillText(n, x + 74, y + 66 + i * 17); ctx.fillStyle = c; ctx.fillText(r, x + 190, y + 66 + i * 17); });
+    ctx.fillStyle = '#000'; ctx.font = 'italic 11px Arial, sans-serif';
+    ctx.fillText(Math.floor(modal.t * 8) % 2 ? 'Scanning... is this clean?' : 'Scanning... is this clean??', x + 30, y + 128);
+  } else if (crash) {
+    ctx.fillStyle = '#d00'; ctx.beginPath(); ctx.arc(x + 40, y + 65, 18, 0, 6.28); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x + 32, y + 57); ctx.lineTo(x + 48, y + 73); ctx.moveTo(x + 48, y + 57); ctx.lineTo(x + 32, y + 73); ctx.stroke();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 13px Arial, sans-serif'; ctx.fillText('Longshot.exe has stopped working', x + 74, y + 50);
+    ctx.font = '12px Arial, sans-serif'; ctx.fillText('A problem caused the program to stop', x + 74, y + 70); ctx.fillText('working correctly. (upstream: gone)', x + 74, y + 86);
+    ctx.fillStyle = '#fff'; ctx.fillRect(x + 30, y + 108, 320, 14); ctx.strokeStyle = '#808080'; ctx.lineWidth = 1; ctx.strokeRect(x + 30.5, y + 108.5, 320, 14);
+    ctx.fillStyle = '#000080'; for (let i = 0; i < 4; i++) ctx.fillRect(x + 32 + ((modal.t * 160 + i * 24) % 310), y + 110, 16, 10);
+    ctx.fillStyle = '#000'; ctx.font = '12px Arial, sans-serif'; ctx.fillText('Checking for a solution...', x + 30, y + 134);
+  } else {
+    ctx.fillStyle = '#fc0'; ctx.beginPath(); ctx.moveTo(x + 40, y + 46); ctx.lineTo(x + 60, y + 82); ctx.lineTo(x + 20, y + 82); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 18px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('!', x + 40, y + 72); ctx.textAlign = 'left';
+    ctx.font = 'bold 13px Arial, sans-serif'; ctx.fillText('Update available!', x + 74, y + 50);
+    ctx.font = '12px Arial, sans-serif'; ctx.fillText('Longshot v3.0.0-rc.3 -> v3.0.0-rc.4', x + 74, y + 70); ctx.fillText('Install now? (upstream: gone)', x + 74, y + 86);
+  }
+  const labels = modal.kind === 'virus' ? ['False positive', 'Run anyway'] : crash ? ['Close program', 'Debug'] : ['Longshot', 'Longshot'];
+  MODAL_BTNS.forEach((b, i) => {
+    bevel(b.x, b.y, b.w, b.h); ctx.fillStyle = '#000'; ctx.font = '13px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(labels[i], b.x + b.w / 2, b.y + b.h / 2);
+  });
+}
+
+// ---------- the settings menu (esc) ----------
+const MENU = { x: 140, y: 80, w: 520, h: 420, rows: ['rt', 'pt', 'mfg', 'lock', 'music'], rowY: 130, rowH: 32, rowGap: 40, sx: 200, sw: 360, sy: 362 };
+function menuLabel(k){
+  switch (k) {
+    case 'rt': return rtOn ? 'Raytracing: ON' : 'Raytracing: OFF (looks identical)';
+    case 'pt': return ptOn ? 'Pathtracing: ON (performance impact: none)' : 'Pathtracing: OFF (you cannot tell)';
+    case 'mfg': return mfgOn ? 'Frame Generation 4x: ON (3 of 4 frames are lies)' : 'Frame Generation: OFF (all frames real. boring.)';
+    case 'lock': return '60 FPS LOCK: ON (cannot be disabled)';
+    default: return musicOn ? 'Sound & chiptune: ON' : 'Sound & chiptune: OFF';
+  }
+}
+function menuOn(k){ return k === 'rt' ? rtOn : k === 'pt' ? ptOn : k === 'mfg' ? mfgOn : k === 'lock' ? true : musicOn; }
+function applyFilter(){ cv.style.filter = 'saturate(' + (1 + dlss * 0.11).toFixed(2) + ') contrast(' + (1 + dlss * 0.03).toFixed(2) + ') brightness(1.05)'; }
+function toggleSetting(k){
+  if (k === 'lock') { toast = { text: 'NO. The 60 FPS lock stays.', t: 0 }; shake = 10; beep(100, 0.2, 'sawtooth', 0.08, -40); return; }
+  if (k === 'rt') rtOn = !rtOn; else if (k === 'pt') ptOn = !ptOn; else if (k === 'mfg') { mfgOn = !mfgOn; glitchT = 0; } else musicOn = !musicOn;
+  beep(700, 0.05, 'square', 0.05);
+  if (k === 'rt' || k === 'pt') toast = { text: 'Applied. (no visible change)', t: 0 };
+}
+function menuClick(){
+  const m = MENU, mx = mouse.x, my = mouse.y;
+  m.rows.forEach((k, i) => { const y = m.rowY + i * m.rowGap; if (mx >= 170 && mx <= 630 && my >= y && my <= y + m.rowH) toggleSetting(k); });
+  if (mx >= m.sx - 10 && mx <= m.sx + m.sw + 10 && my >= m.sy - 16 && my <= m.sy + 24) {
+    dlss = Math.max(0, Math.min(11, Math.round((mx - m.sx) / m.sw * 11))); applyFilter(); beep(300 + dlss * 60, 0.05, 'square', 0.05);
+  }
+  if (mx >= 300 && mx <= 500 && my >= 452 && my <= 484) menuOpen = false;
+}
+function drawMenu(){
+  const m = MENU;
+  ctx.fillStyle = 'rgba(0,0,0,.78)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#121212'; ctx.fillRect(m.x, m.y, m.w, m.h); ctx.strokeStyle = '#76b900'; ctx.lineWidth = 3; ctx.strokeRect(m.x, m.y, m.w, m.h);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold 22px Impact, sans-serif'; ctx.fillStyle = '#76b900';
+  ctx.fillText('SETTINGS (ALL OF THEM REAL)', W/2, m.y + 32);
+  m.rows.forEach((k, i) => {
+    const y = m.rowY + i * m.rowGap, on = menuOn(k);
+    ctx.fillStyle = '#1e1e1e'; ctx.fillRect(170, y, 460, m.rowH);
+    ctx.fillStyle = on ? '#76b900' : '#333'; ctx.fillRect(180, y + 7, 18, 18);
+    if (on) { ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(184, y + 16); ctx.lineTo(188, y + 21); ctx.lineTo(195, y + 11); ctx.stroke(); }
+    ctx.textAlign = 'left'; ctx.font = '14px monospace'; ctx.fillStyle = '#fff'; ctx.fillText(menuLabel(k), 210, y + 17);
+  });
+  ctx.textAlign = 'left'; ctx.font = '14px monospace'; ctx.fillStyle = '#fff';
+  ctx.fillText('DLSS 5 strength: ' + dlss + (dlss === 11 ? ' (MAXIMUM CRISPY)' : dlss === 0 ? ' (why)' : ''), 200, 336);
+  ctx.fillStyle = '#333'; ctx.fillRect(m.sx, m.sy, m.sw, 8);
+  ctx.fillStyle = '#76b900'; ctx.fillRect(m.sx, m.sy, m.sw * dlss / 11, 8);
+  ctx.fillStyle = '#fff'; ctx.fillRect(m.sx + m.sw * dlss / 11 - 5, m.sy - 8, 10, 24);
+  ctx.font = '10px monospace'; ctx.fillStyle = '#888'; ctx.fillText('0', m.sx, m.sy + 26); ctx.textAlign = 'right'; ctx.fillText('11', m.sx + m.sw, m.sy + 26);
+  ctx.textAlign = 'left'; ctx.font = '13px monospace'; ctx.fillStyle = '#aaa';
+  ctx.fillText('Rays traced: 0 (0 per second)', 200, 405);
+  ctx.fillText('Faction balance: ' + (faction < 0 ? 'HOOKSHOT ' : 'LONGSHOT ') + Math.abs(Math.round(faction * 100)) + '%  |  Emulator war: ongoing', 200, 425);
+  ctx.fillStyle = '#76b900'; ctx.fillRect(300, 452, 200, 32); ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
+  ctx.fillText('CLOSE (ESC)', 400, 468);
+}
+
+// ---------- the death screen: fake benchmark + local leaderboard ----------
+function drawDead(){
+  ctx.fillStyle = 'rgba(0,0,0,.82)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 54px Impact, sans-serif'; ctx.fillStyle = '#f33'; ctx.lineWidth = 6; ctx.strokeStyle = '#000';
+  ctx.strokeText('YOU DIED (AT 60 FPS)', W/2, 52); ctx.fillText('YOU DIED (AT 60 FPS)', W/2, 52);
+  ctx.font = '20px "Comic Sans MS", sans-serif'; ctx.fillStyle = '#ff0'; ctx.fillText(deathLine, W/2, 100);
+
+  ctx.fillStyle = 'rgba(20,20,20,.92)'; ctx.fillRect(50, 130, 320, 290); ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2; ctx.strokeRect(50, 130, 320, 290);
+  ctx.textAlign = 'left'; ctx.font = 'bold 15px monospace'; ctx.fillStyle = '#0f0'; ctx.fillText('BENCHMARK RESULTS', 68, 152);
+  const lines = ['Avg FPS: 60.0', '1% lows: 60.0', '0.1% lows: 60.0', 'GPU temp: 3 °C', 'VRAM used: 0.0 / 32 GB', 'Rays traced: 0',
+    'Frames generated: ' + Math.floor(runTime * 180) + ' (all fake)', '5090 Ti harmed: NO'];
+  ctx.font = '14px monospace'; ctx.fillStyle = '#cfc';
+  lines.forEach((l, i) => ctx.fillText(l, 68, 184 + i * 22));
+  ctx.fillStyle = '#fff'; ctx.fillText('Survived ' + Math.floor(runTime) + 's  |  Wave ' + wave, 68, 372);
+  ctx.fillText('Kills ' + kills + '  |  Rupees ' + score, 68, 394);
+
+  ctx.fillStyle = 'rgba(20,20,20,.92)'; ctx.fillRect(430, 130, 320, 290); ctx.strokeStyle = '#ffd54f'; ctx.strokeRect(430, 130, 320, 290);
+  ctx.font = 'bold 15px monospace'; ctx.fillStyle = '#ffd54f'; ctx.fillText('LEADERBOARD (this browser)', 448, 152);
+  ctx.font = '13px monospace';
+  boardCache.forEach((r, i) => {
+    const y = 184 + i * 30;
+    if (i === lastRank) { ctx.fillStyle = 'rgba(255,213,79,.25)'; ctx.fillRect(438, y - 11, 304, 24); }
+    ctx.fillStyle = i === lastRank ? '#fff' : '#ccc';
+    ctx.fillText((i + 1) + '. ' + r.name, 448, y);
+    ctx.textAlign = 'right'; ctx.fillText(r.score + ' (w' + r.wave + ')', 736, y); ctx.textAlign = 'left';
+  });
+  if (lastRank < 0) { ctx.fillStyle = '#fff'; ctx.fillText('You: #' + runRank + ' (' + myName + ')', 448, 372); }
+  ctx.textAlign = 'center'; ctx.font = '22px "Comic Sans MS", sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText('click to try again with even more DLSS 5', W/2, 470);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#777'; ctx.fillText('Lichii dev has left the server. Frichti dev is typing...', W/2, 510);
+}
+
+// ---------- AI slop + malware jokes ----------
+LABELS.push('AI SLOP', 'VIBE CODED', 'IS THIS CLEAN?', 'VIRUSTOTAL 3/70', 'FALSE POSITIVE', 'NO MALWARE*', 'SIX FINGERS', 'TROJAN? NO',
+  '100% HUMAN MADE*', 'SLOPSHOT', 'CHECK THE HASH', 'DEFENDER SAYS NO');
+TOASTS.push('Windows Defender quarantined 1 rupee', 'AI slop level: 100%', 'Antivirus flagged this game. Antivirus is wrong.',
+  'Link now has 6 fingers (generated)', 'Checksum verified. The checksum is also AI slop.', 'Is this clean? (it is just a browser tab)');
+DEATH.push('AI slop got you. It had 7 fingers.', 'died to a trojan (false positive)', 'is this clean? no.');
+HOT_TITLES.push('Is this clean? (VirusTotal 3/70)', 'PSA: Longshot_FINAL_v2_real.exe is NOT official', 'AI slop NPCs now in Longshot', 'Antivirus deleted my save, ban antivirus');
+DRAMA_HEADLINES.push(
+  'Frichti accused of AI slop commits; dev says "it is a feature"',
+  'Lichii flagged by antivirus; dev: "false positive, trust me"',
+  'Longshot_FINAL_v2_realnew.exe appears on a random Discord. Mods: "that is NOT us"',
+  'Hookshot dev: "I only vibe-coded the 60 FPS counter"',
+  'Clawshot readme found to be 100% AI slop. Readme: "I am a human".',
+);
+COMMENTS.push(
+  'is this clean?',
+  'is this clean? VirusTotal says 3/70, probably false positives',
+  'antivirus flagged it, so it must be good',
+  'ran it in a VM. the VM also ran it in a VM.',
+  'downloaded Longshot_FINAL_v2_realnew.exe from a Discord link, am I safe?',
+  'Windows Defender deleted my 5090 Ti. send help',
+  'this readme was clearly AI slop, Link has 6 fingers on the cover',
+  'AI slop dev: "I only used it for the commit messages." the commit messages: "fix"',
+  'please add a checksum. oh wait, there is one. it is also AI slop.',
+  'always check the hash. also "is this clean" is not a valid question',
+  'my antivirus said "trojan" and my antivirus is never wrong, except when it is',
+  'it is not malware, it is a recomp. same thing, different vibes.',
+  'sus. why does the game want my GPU, my CPU and my soul',
+  'AI slop enemies regenerate with 7 fingers. peak 2026.',
+  'who vibe-coded the boss? it denoises itself and I love it',
+  'false positive. probably. i did not read the report.',
+  'I scanned it with 3 antiviruses, 2 said clean, 1 said "lol"',
+  'the only virus here is the Hookshot vs Longshot argument',
+  'trust me bro, it is clean. source: trust me, bro',
+  'not malware, just cryptominers. kidding. (is it?)',
+);
+
+function drawBoot(){
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const lines = [
+    'BACKSHOOTS RECOMP LAUNCHER  v∞.0.0-rc.∞',
+    '> looking for upstream ............ gone',
+    '> merging PR #840 ................. ok (by us)',
+    '> please provide your own ROM (legally)',
+    '> ROM found: totally_legit.z64 .... it is',
+    '> applying Hookshot  v2.2.0-rc.1 .. ok',
+    '> applying Longshot  v3.0.0-rc.3 .. ok',
+    '> applying Clawshot  v0.0.1-copium  ok',
+    '> applying Backshoots (nobody asked) ok',
+  ];
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = '16px monospace';
+  const n = Math.min(lines.length, Math.floor(bootT / 0.5) + 1);
+  for (let i = 0; i < n; i++) { ctx.fillStyle = i === 0 ? '#0ff' : '#0f0'; ctx.fillText(lines[i], 30, 24 + i * 24); }
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 72px Impact, sans-serif'; ctx.lineWidth = 8; ctx.strokeStyle = '#000';
+  ctx.save(); ctx.translate(W/2, 340); ctx.rotate(Math.sin(time * 3) * 0.03);
+  ctx.strokeText('BACKSHOOTS', 0, 0); ctx.fillStyle = `hsl(${(time * 240) % 360},100%,60%)`; ctx.fillText('BACKSHOOTS', 0, 0);
+  ctx.restore();
+  ctx.font = '16px "Comic Sans MS", sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText('the recomp of the recomps of the recomps', W/2, 392);
+
+  const ready = bootT >= BOOT_LEN, pr = ready ? 1 : Math.min(0.99, bootT / BOOT_LEN);
+  ctx.fillStyle = '#222'; ctx.fillRect(30, 430, W - 60, 22);
+  ctx.fillStyle = ready ? '#0f0' : '#0af'; ctx.fillRect(30, 430, (W - 60) * pr, 22);
+  ctx.font = '14px monospace'; ctx.fillStyle = '#fff';
+  ctx.fillText(ready ? 'shaders compiled: 100% (it is a browser game)' : 'compiling shaders ' + Math.floor(pr * 100) + '% ' + (pr >= 0.99 ? '(always 99% for a while, that is normal)' : ''), W/2, 441);
+  if (ready && Math.floor(time * 3) % 2) {
+    ctx.font = 'bold 30px Impact, sans-serif'; ctx.fillStyle = '#ff0'; ctx.strokeStyle = '#000'; ctx.lineWidth = 5;
+    ctx.strokeText('CLICK TO PLAY (AT 60 FPS)', W/2, 500); ctx.fillText('CLICK TO PLAY (AT 60 FPS)', W/2, 500);
+  }
+  ctx.font = '13px monospace'; ctx.fillStyle = '#888';
+  ctx.fillText('WASD move · LEFT CLICK sword · RIGHT CLICK item · 1-4 / wheel · ESC settings · M music', W/2, 566);
+}
+
+function draw(dt){
+  if (state === 'boot') { drawBoot(); drawFlashers(dt); drawComments(); drawBadges(); return; }
+
+  ctx.save();
+  if (shake > 0.5) ctx.translate(rnd(-shake, shake), rnd(-shake, shake));
+  applyZoom();
+  drawGround();
+  const objs = [];
+  trees.forEach(t => objs.push({ y: t.y, f: () => drawTree(t) }));
+  enemies.forEach(e => objs.push({ y: e.y, f: () => drawEnemy(e) }));
+  objs.push({ y: player.y, f: drawPlayer });
+  objs.sort((a, b) => a.y - b.y).forEach(o => o.f());
+  items.forEach(drawItem);
+  drawHook();
+  for (const q of particles) { ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, 3, 3); }
+  ctx.restore();
+
+  postFX();
+  frameGenGhosting();
+  drawDLSSMoment();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const q of popups) {
+    ctx.globalAlpha = 1 - q.t / 1.2; ctx.font = 'bold 22px "Comic Sans MS", sans-serif';
+    ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText(q.text, q.x, q.y);
+    ctx.fillStyle = q.color; ctx.fillText(q.text, q.x, q.y); ctx.globalAlpha = 1;
+  }
+
+  drawFlashers(dt);
+  drawComments();
+  drawHot();
+  drawDrama();
+  drawEnemyMarkers();
+  drawBadges();
+  drawTitle();
+  drawHUD();
+  drawFaction();
+  drawToast();
+  if (menuOpen) drawMenu();
+  if (modal) drawModal();
+
+  if (introT > 0 && state === 'play') {
+    introT -= dt;
+    ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(W/2 - 270, H - 112, 540, 76);
+    ctx.font = 'bold 17px "Comic Sans MS", sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('WASD = move  |  LEFT CLICK = sword', W/2, H - 94);
+    ctx.fillText('RIGHT CLICK = item  |  1-4 / WHEEL = switch', W/2, H - 72);
+    ctx.fillText('ESC = settings  |  M = music', W/2, H - 50);
+  }
+
+  if (state === 'dead') drawDead();
+}
+
+function loop(now){
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const sdt = slow > 0 ? dt * 0.4 : dt; if (slow > 0) slow -= dt;
+  update(sdt); draw(sdt);
+  requestAnimationFrame(loop);
+}
+reset(); state = 'boot'; introT = 10;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
