@@ -1409,6 +1409,8 @@ function drawDead(){
 }
 
 // ---------- AI slop + malware jokes ----------
+TOASTS.push('Comeshot patches: merged (by us)', 'Comeshot patches: pending (day 412)', 'New fork detected: Backshoots 2 (fork of a fork of a fork)', 'Fork away, it is 0BSD');
+LABELS.push('COMESHOT PATCHES: PENDING', 'FORK IT', 'FORK OF A FORK OF A FORK');
 LABELS.push('AI SLOP', 'VIBE CODED', 'IS THIS CLEAN?', 'VIRUSTOTAL 3/70', 'FALSE POSITIVE', 'NO MALWARE*', 'SIX FINGERS', 'TROJAN? NO',
   '100% HUMAN MADE*', 'SLOPSHOT', 'CHECK THE HASH', 'DEFENDER SAYS NO');
 TOASTS.push('Windows Defender quarantined 1 rupee', 'AI slop level: 100%', 'Antivirus flagged this game. Antivirus is wrong.',
@@ -1457,6 +1459,7 @@ function drawBoot(){
     '> applying Longshot  v3.0.0-rc.3 .. ok',
     '> applying Clawshot  v0.0.1-copium  ok',
     '> applying Backshoots (nobody asked) ok',
+    '> applying Comeshot patches ..... pending',
   ];
   ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = '16px monospace';
   const n = Math.min(lines.length, Math.floor(bootT / 0.5) + 1);

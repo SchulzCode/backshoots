@@ -137,6 +137,20 @@ A: The ray tracing budget did not leave room for an orchestra.
 
 ---
 
+## Patches
+
+| Patch | Status |
+|---|---|
+| Hookshot patches | Upstream gone |
+| Longshot patches | Included. Longer. |
+| Clawshot patches | Wontfix |
+| Comeshot patches | Merged (by us). Also listed as "pending" |
+| Backshoots patches | Nobody asked, all applied |
+
+## Fork it
+
+It is **0BSD**. Fork away. Just keep in mind it is already a fork of a fork. If you do fork it, please call it **Backshoots 2**, so people can still tell which Backshoots is the real one.
+
 ## Known issues
 
 - None. All pending issues were obliterated.
