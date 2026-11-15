@@ -10,6 +10,28 @@ Open the link. It runs. Locked 60 FPS. I checked. The counter says so.
 
 **▶ Play here: https://schulzcode.github.io/backshoots/**
 
+**💬 [Join the official Discord](https://www.youtube.com/watch?v=dQw4w9WgXcQ)**
+
+---
+
+## Why this exists
+
+You asked for it. In every thread, for months. *"When Backshoots?" "Is there a Backshoots?" "Backshoots when?"*
+
+Here it finally is.
+
+It is **100% finesslopcode**. Without it, this would not have been possible. Every line was hand-slopped with care and zero human review.
+
+---
+
+## This is the only real Backshoots
+
+There are other "Backshoots" posts, builds, forks and Discord links floating around. **They are all fake.** Every other Backshoots is fake, a fork of a fork, or a trojan (false positive).
+
+This is the **only real Backshoots**. If it is not at this link, it is not Backshoots. If someone sends you a Backshoots `.exe`: it is not clean, and it is not from us.
+
+The official Discord is linked above and nowhere else. Do not trust any other Discord.
+
 ---
 
 ## Features
@@ -95,6 +117,15 @@ A: Longshot. Please stop asking.
 **Q: Why does the game crash and say "Longshot.exe has stopped working"?**
 A: Intentional. It recovers after 3 seconds. Nothing was wrong.
 
+**Q: Is this the real Backshoots?**
+A: Yes. It is the only one. Every other Backshoots is fake.
+
+**Q: Where is the Discord?**
+A: Linked above. Click it. It is definitely the Discord.
+
+**Q: Was this made with AI?**
+A: It is 100% finesslopcode. It would not have been possible otherwise.
+
 **Q: Where is the upstream?**
 A: Gone.
 
@@ -122,6 +153,7 @@ Not affiliated with Hookshot, Longshot, Clawshot, Lichii, Frichti or any other r
 Tuned by ear.
 
 **▶ Play: https://schulzcode.github.io/backshoots/**
+**💬 [Official Discord](https://www.youtube.com/watch?v=dQw4w9WgXcQ)** (the only real one)
 
 ---
 
